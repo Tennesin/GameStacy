@@ -1,4 +1,4 @@
-"""Основа мини-игр: приём выборов сообщениями, броски с паузой, объявление победителя."""
+"""Основа мини-игр: приём выборов кнопками, броски с паузой, объявление победителя."""
 import asyncio
 import logging
 import random
@@ -17,6 +17,44 @@ class MiniResult:
     names: dict = field(default_factory=dict)     # ID -> ник на сервере
     aborted: bool = False                         # True — игра отменена или остановлена
 
+class PickView(discord.ui.View):
+    """Кнопки выбора. Ответ на нажатие скрытый: в канале ничего не появляется,
+    чужие выборы не видны. Повторное нажатие меняет выбор."""
+
+    def __init__(self, game: "MiniGame"):
+        super().__init__(timeout=None)
+        self.game = game
+        self.picks: dict = {}          # uid -> выбранное значение
+        self.names: dict = {}          # uid -> ник на сервере
+        self.dirty = False             # были изменения с последней правки счётчика
+        self.open = True
+        self.done = asyncio.Event()    # выбрали все ожидаемые игроки
+        for i, (label, value) in enumerate(game.pick_buttons()):
+            btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary,
+                                    row=i // game.pick_row_width)
+            btn.callback = self._make_callback(value)
+            self.add_item(btn)
+
+    def _make_callback(self, value: int):
+        async def callback(interaction: discord.Interaction):
+            game = self.game
+            uid = interaction.user.id
+            if not self.open:
+                await interaction.response.send_message("Приём выборов закрыт.", ephemeral=True)
+                return
+            if game.players is not None and uid not in game.players:
+                await interaction.response.send_message("Вы не участвуете в этой игре.", ephemeral=True)
+                return
+            self.picks[uid] = value
+            self.names[uid] = interaction.user.display_name
+            self.dirty = True
+            await interaction.response.send_message(
+                f"Ваш выбор: **{game.pick_label(value)}**. Пока идёт приём, его можно изменить.",
+                ephemeral=True)
+            if game.players is not None and game.players <= self.picks.keys():
+                self.done.set()
+        return callback
+
 class MiniGame:
     """Шаблон: правила -> приём выборов -> показ выборов -> play() -> reward().
     Наследник задаёт key/title/rules/pick_min/pick_max и пишет play()."""
@@ -26,16 +64,17 @@ class MiniGame:
     rules = ""
     pick_min = 1
     pick_max = 1
+    pick_row_width = 5          # кнопок в ряду (максимум 5)
 
     def __init__(self, bot, channel, players=None, pick_seconds=None, roll_delay=None):
         self.bot = bot
         self.channel = channel
-        self.players = set(players) if players else None     # None — играет любой, кто напишет
+        self.players = set(players) if players else None     # None — играет любой, кто нажмёт кнопку
         self.pick_seconds = pick_seconds or MINI_PICK_SECONDS
         self.roll_delay = MINI_ROLL_DELAY if roll_delay is None else roll_delay
         self.picks: dict = {}       # uid -> выбранное число
         self.names: dict = {}       # uid -> ник на сервере
-        self.stopped = False        # остановлена командой -mini stop
+        self.stopped = False        # остановлена командой
         self._bg: set = set()
 
     # ---------- Хуки для наследников ----------
@@ -46,6 +85,10 @@ class MiniGame:
 
     def pick_label(self, pick: int) -> str:
         return str(pick)
+
+    def pick_buttons(self) -> list:
+        """[(подпись кнопки, значение выбора)]. По умолчанию — по кнопке на каждое число диапазона."""
+        return [(str(n), n) for n in range(self.pick_min, self.pick_max + 1)]
 
     async def reward(self, winners: list):
         """Что получает победитель."""
@@ -71,6 +114,7 @@ class MiniGame:
         return f"<@{uid}>"
 
     def parse_pick(self, text: str):
+        """Оставлено для совместимости: разбор числа из текста (кнопки им не пользуются)."""
         t = text.strip()
         if t.isdigit() and self.pick_min <= int(t) <= self.pick_max:
             return int(t)
@@ -100,45 +144,39 @@ class MiniGame:
             lines.append(f"{self.nm(uid)} — {self.pick_label(p)}")
         return "\n".join(lines)
 
-    # ---------- Приём выборов ----------
-
-    def _check(self, m: discord.Message) -> bool:
-        if m.channel.id != self.channel.id or m.author.bot:
-            return False
-        if self.players is not None and m.author.id not in self.players:
-            return False
-        return self.parse_pick(m.content) is not None
-
-    async def _after_pick(self, msg: discord.Message, status: discord.Message):
-        """Скрывает выбор от остальных и обновляет счётчик. Идёт фоном, чтобы не пропускать новые сообщения."""
-        try:
-            await msg.delete()
-        except discord.HTTPException:                       # нет права «Управление сообщениями» и т. п.
-            with suppress(discord.HTTPException):
-                await msg.add_reaction("✅")
-        with suppress(discord.HTTPException):
-            await status.edit(content=f"⏳ Принято выборов: {len(self.picks)}")
+    # ---------- Приём выборов (кнопки) ----------
 
     async def collect_picks(self):
-        status = await self.channel.send("⏳ Принято выборов: 0")
+        view = PickView(self)
+        ends = int(self.bot.clock.now().timestamp()) + self.pick_seconds
+        head = f"👇 **Сделайте выбор кнопкой.** Приём закрывается <t:{ends}:R>."
+
+        def text() -> str:
+            return f"{head}\n⏳ Принято выборов: {len(view.picks)}"
+
+        msg = await self.channel.send(text(), view=view)
         deadline = time.monotonic() + self.pick_seconds
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            try:
-                msg = await self.bot.wait_for("message", check=self._check, timeout=left)
-            except asyncio.TimeoutError:
-                break
-            self.picks[msg.author.id] = self.parse_pick(msg.content)   # передумать можно: считается последнее
-            self.names[msg.author.id] = msg.author.display_name
-            task = asyncio.create_task(self._after_pick(msg, status))
-            self._bg.add(task)
-            task.add_done_callback(self._bg.discard)
-            if self.players is not None and self.players <= self.picks.keys():
-                break                                       # выбрали все ожидаемые игроки
-        with suppress(discord.HTTPException):
-            await status.edit(content=f"🔒 Приём выборов закрыт. Принято: {len(self.picks)}")
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(view.done.wait(), timeout=min(1.0, left))
+                    break                                   # выбрали все ожидаемые игроки
+                except asyncio.TimeoutError:
+                    pass
+                if view.dirty:                              # счётчик правим не чаще раза в секунду
+                    view.dirty = False
+                    with suppress(discord.HTTPException):
+                        await msg.edit(content=text())
+        finally:                                            # в том числе при остановке игры командой
+            view.open = False
+            view.stop()
+            self.picks = dict(view.picks)
+            self.names.update(view.names)
+            with suppress(discord.HTTPException):
+                await msg.edit(content=f"🔒 Приём выборов закрыт. Принято: {len(self.picks)}", view=None)
 
     # ---------- Сценарий ----------
 

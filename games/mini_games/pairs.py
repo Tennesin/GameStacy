@@ -8,8 +8,7 @@ class PairsGame(MiniGame):
     title = "Выбери пару!"
     pick_min, pick_max = 1, 6
     GOAL = 5
-    rules = ("Выберите пару: **1-2**, **3-4** или **5-6**. Отправьте в чат любое из чисел 1-6 "
-             "(число засчитывается за пару, в которую входит). Пару могут выбрать несколько игроков.\n"
+    rules = ("Выберите пару кнопкой: **1-2**, **3-4** или **5-6**. Пару могут выбрать несколько игроков.\n"
              "Стейси бросает кубик: выпавшее число даёт 1 очко своей паре. "
              "Если выпало число пары, которую никто не выбрал, бросок пропускается. "
              "Побеждает пара, первой набравшая 5 очков.")
@@ -20,6 +19,9 @@ class PairsGame(MiniGame):
 
     def pick_label(self, pick: int) -> str:
         return f"пара {PAIRS[self.pair_of(pick)]}"
+
+    def pick_buttons(self) -> list:
+        return [(name, i * 2 + 1) for i, name in enumerate(PAIRS)]
 
     def _board(self, scores: list, last, skipped: bool = False) -> str:
         head = "🎲 **Выбери пару!**"

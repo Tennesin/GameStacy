@@ -13,14 +13,16 @@ class MiniGameManager:
         self.bot = bot
         self.games: dict = {}        # key -> класс мини-игры
         self.active: dict = {}       # channel_id -> (задача, объект игры)
-        self.background: set = set() # удерживает ссылки на фоновые задачи консоли
+        self.starters: dict = {}     # channel_id -> ID того, кто запустил (None — запуск из консоли)
+        self.background: set = set() # удерживает ссылки на фоновые задачи
 
     def register(self, cls):
         self.games[cls.key] = cls
 
-    async def play(self, key: str, channel, players=None, **kwargs) -> MiniResult:
+    async def play(self, key: str, channel, players=None, starter=None, **kwargs) -> MiniResult:
         """Проводит мини-игру и возвращает результат. Основная игра вызывает именно этот метод.
-        players — множество ID участников (None — играет любой в канале)."""
+        players — множество ID участников (None — играет любой в канале).
+        starter — ID запустившего (для права остановки)."""
         cls = self.games.get(key)
         if cls is None:
             raise KeyError(f"Нет мини-игры «{key}»")
@@ -30,6 +32,7 @@ class MiniGameManager:
         game: MiniGame = cls(self.bot, channel, players, **kwargs)
         task = asyncio.create_task(game.run())      # отдельная задача, чтобы stop() не отменял вызывающего
         self.active[channel.id] = (task, game)
+        self.starters[channel.id] = starter
         try:
             return await task
         except asyncio.CancelledError:
@@ -44,6 +47,7 @@ class MiniGameManager:
             return MiniResult([], game.names, aborted=True)
         finally:
             self.active.pop(channel.id, None)
+            self.starters.pop(channel.id, None)
 
     def stop(self, channel_id: int) -> bool:
         item = self.active.get(channel_id)
