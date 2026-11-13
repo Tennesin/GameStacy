@@ -23,13 +23,20 @@ class CloserGame(MiniGame):
     async def play(self) -> list:
         scores = {u: 0 for u in self.picks}
         board = await self.show(None, self._board(scores, None, []))
+        rnd = 0
         while True:
+            rnd += 1
             n = await self.roll(12)
             dist = {u: abs(p - n) for u, p in self.picks.items()}
             best = min(dist.values())
             near = [u for u, d in dist.items() if d == best]
             for u in near:
                 scores[u] += 1
+            self.trace(f"Раунд {rnd}: выпало {n}; ближайшая дистанция {best}; "
+                       f"очко получают: {', '.join(self.label(u) for u in near)}")
+            for u in scores:
+                self.trace(f"  {self.label(u)}: загадал {self.picks[u]}, "
+                           f"расстояние {dist[u]}, баллов {scores[u]}/{self.GOAL}")
             board = await self.show(board, self._board(scores, n, near))
             done = [u for u in near if scores[u] >= self.GOAL]
             if done:

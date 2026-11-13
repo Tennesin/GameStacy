@@ -1,11 +1,14 @@
 """Мини-игра «Тяни верёвку!»: броски кубика делаются кнопкой 🎲."""
 import asyncio
+import logging
 import random
 from contextlib import suppress
 
 import discord
 
 from .base import MiniGame
+
+log = logging.getLogger("stacy.mini")
 
 DUMMY = -1                                   # «ID» манекена (настоящие ID Discord всегда положительные)
 TEAMS = [("🟥", "Красные"), ("🟦", "Синие")]
@@ -39,21 +42,32 @@ class RollView(discord.ui.View):
     @discord.ui.button(emoji="🎲", style=discord.ButtonStyle.success)
     async def roll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = interaction.user.id
+        who = f"{interaction.user.display_name} ({uid})"
         if uid not in self.rollers:
+            self.game.trace(f"{who} нажал 🎲, но не участвует: отказано")
             await interaction.response.send_message("Вы не участвуете в этой игре.", ephemeral=True)
             return
         if not self.open:
+            self.game.trace(f"{who} нажал 🎲, но приём бросков закрыт")
             await interaction.response.send_message("Приём бросков сейчас закрыт.", ephemeral=True)
             return
         if uid in self.rolls:
+            self.game.trace(f"{who} нажал 🎲 повторно (раунд {self.rnd}): отказано")
             await interaction.response.send_message("Вы уже бросили кубик в этом раунде.", ephemeral=True)
             return
 
         self.rolls[uid] = random.randint(1, self.game.SIDES)
+        self.game.trace(f"Раунд {self.rnd}: {who} бросил кубик, выпало {self.rolls[uid]} "
+                        f"({len(self.rolls)}/{len(self.rollers)})")
         text = self.game._throw_text(self.rnd, len(self.rolls), len(self.rollers))
         await interaction.response.edit_message(content=text, view=self)
         if len(self.rolls) >= len(self.rollers):          # сигнал только после ответа на нажатие,
             self.all_rolled.set()                          # чтобы правка игры не обогнала правку кнопки
+
+    async def on_error(self, interaction, error, item):
+        who = f"{interaction.user.display_name} ({interaction.user.id})"
+        self.game.trace(f"ОШИБКА при броске у {who}: {type(error).__name__}: {error}")
+        log.error("Ошибка кнопки броска", exc_info=error)
 
 class TugGame(MiniGame):
     key = "tug"
@@ -147,6 +161,9 @@ class TugGame(MiniGame):
         rollers = set(players)
         total = len(rollers)
         scores = [0, 0]
+        for i in (0, 1):
+            self.trace(f"Команда {TEAMS[i][1]}: " + ", ".join(self.label(u) for u in teams[i]))
+        self.trace(f"Манекен: {'да' if has_dummy else 'нет'}; бросающих людей: {total}")
 
         view = RollView(self, rollers)
         throw_msg = None
@@ -157,25 +174,35 @@ class TugGame(MiniGame):
             while True:
                 rnd += 1
                 # 1. Кнопка включена, ждём нажатий (или конца времени)
+                self.trace(f"--- Раунд {rnd}: приём бросков открыт на {self.THROW_SECONDS} с")
                 view.begin(rnd)
                 throw_msg = await self._set_throw(throw_msg, self._throw_text(rnd, 0, total), view)
+                reason = "время вышло"
                 try:
                     await asyncio.wait_for(view.all_rolled.wait(), timeout=self.THROW_SECONDS)
+                    reason = "бросили все"
                 except asyncio.TimeoutError:
                     pass
 
                 # 2. Кнопка выключена, показываем итоги
                 rolls = view.close()
+                self.trace(f"Раунд {rnd}: приём бросков закрыт ({reason}); бросили {len(rolls)} из {total}")
+                for u in rollers - rolls.keys():
+                    self.trace(f"  {self.label(u)} не бросил: 0 очков")
                 throw_msg = await self._set_throw(
                     throw_msg, self._throw_text(rnd, len(rolls), total, closed=True), view)
                 if has_dummy:
                     rolls[DUMMY] = random.randint(1, self.SIDES)
+                    self.trace(f"Раунд {rnd}: манекен бросил кубик, выпало {rolls[DUMMY]}")
 
                 totals = [sum(rolls.get(u, 0) for u in t) for t in teams]
+                before = list(scores)
                 if totals[0] == totals[1]:
                     verdict = "ничья: верёвка не сдвинулась"
                 else:
                     verdict = self._apply(scores, 0 if totals[0] > totals[1] else 1)
+                self.trace(f"Раунд {rnd}: суммы {TEAMS[0][1]} {totals[0]} — {totals[1]} {TEAMS[1][1]}; "
+                           f"{verdict}; счёт {before} -> {scores}")
                 details = [f"**Раунд {rnd}:** {TEAMS[0][0]} {totals[0]} — {totals[1]} {TEAMS[1][0]} · {verdict}",
                            self._rolls_line(0, teams, rolls),
                            self._rolls_line(1, teams, rolls)]
@@ -193,6 +220,8 @@ class TugGame(MiniGame):
 
         icon, name = TEAMS[win]
         winners = [u for u in teams[win] if u != DUMMY]
+        self.trace(f"Верёвку перетянула команда {name}; победители-люди: "
+                   + (", ".join(self.label(u) for u in winners) or "нет (выиграл манекен)"))
         if winners:
             await self.channel.send(f"🎉 Верёвку перетянула команда {icon} **{name}**!")
         else:

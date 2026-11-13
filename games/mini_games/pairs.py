@@ -39,16 +39,21 @@ class PairsGame(MiniGame):
     async def play(self) -> list:
         scores = [0, 0, 0]
         chosen = {self.pair_of(p) for p in self.picks.values()}     # пары, у которых есть игроки
+        self.trace("Выбранные пары: " + ", ".join(PAIRS[i] for i in sorted(chosen)))
         board = await self.show(None, self._board(scores, None))
         while True:
             n = await self.roll(6)
             idx = self.pair_of(n)
             if idx not in chosen:                                   # пара без игроков: пропуск броска
+                self.trace(f"Выпало {n} -> пара {PAIRS[idx]}: игроков нет, бросок пропущен")
                 board = await self.show(board, self._board(scores, n, skipped=True))
                 continue
             scores[idx] += 1
+            self.trace(f"Выпало {n} -> очко паре {PAIRS[idx]}; счёт: "
+                       + ", ".join(f"{PAIRS[i]}={scores[i]}" for i in range(3)))
             board = await self.show(board, self._board(scores, n))
             if scores[idx] >= self.GOAL:
                 break
+        self.trace(f"Пара {PAIRS[idx]} набрала {self.GOAL} очков")
         await self.channel.send(f"🎉 Первой набрала {self.GOAL} очков пара **{PAIRS[idx]}**!")
         return [u for u, p in self.picks.items() if self.pair_of(p) == idx]

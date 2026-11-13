@@ -38,8 +38,12 @@ class MinesGame(MiniGame):
             history.append(n)
             hit = {u for u in alive if self.picks[u] == n}
             alive -= hit
+            self.trace(f"Взорвалось число {n}; выбыли: "
+                       + (", ".join(self.label(u) for u in sorted(hit)) or "никто")
+                       + f"; осталось: {len(alive)}")
             board = await self.show(board, self._board(history, alive, n, hit))
             if not alive:
+                self.trace("Выбыли все оставшиеся одновременно: победителей нет")
                 await self.channel.send(f"💥 Число {n} накрыло всех оставшихся сразу: победителей нет.")
                 return []
             if len(alive) <= 1:

@@ -26,19 +26,31 @@ class PredictView(discord.ui.View):
 
     async def _pick(self, interaction: discord.Interaction, value: str):
         uid = interaction.user.id
+        who = f"{interaction.user.display_name} ({uid})"
         if not self.open:
+            self.game.trace(f"{who} нажал «{self.game.pick_label(value)}», но приём прогнозов закрыт")
             await interaction.response.send_message("Приём прогнозов закрыт.", ephemeral=True)
             return
         if self.players is not None and uid not in self.players:
+            self.game.trace(f"{who} нажал «{self.game.pick_label(value)}», но выбыл или не участвует: отказано")
             await interaction.response.send_message("Вы выбыли или не участвуете в этой игре.", ephemeral=True)
             return
+        old = self.picks.get(uid)
         self.picks[uid] = value
         self.names[uid] = interaction.user.display_name
+        if old is None:
+            self.game.trace(f"{who} дал прогноз: {self.game.pick_label(value)}")
+        else:
+            self.game.trace(f"{who} изменил прогноз: {self.game.pick_label(old)} -> {self.game.pick_label(value)}")
         await interaction.response.send_message(
             f"Ваш прогноз: **{self.game.pick_label(value)}**. Пока идёт приём, его можно изменить.",
             ephemeral=True)
         if self.players is not None and self.players <= self.picks.keys():
             self.done.set()                                   # прогноз дали все выжившие
+
+    async def on_error(self, interaction, error, item):
+        who = f"{interaction.user.display_name} ({interaction.user.id})"
+        self.game.trace(f"ОШИБКА при прогнозе у {who}: {type(error).__name__}: {error}")
 
     @discord.ui.button(label="Меньше 5", emoji="⬇️", style=discord.ButtonStyle.danger)
     async def less_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -89,15 +101,20 @@ class MoreLessGame(MiniGame):
         """Сообщение с двумя кнопками. Работает и для первого прогноза, и для следующих раундов."""
         view = PredictView(self, self.players)
         msg = await self.channel.send(f"{self.prompt}\nВремя: {self.pick_seconds} с.", view=view)
+        self.trace(f"Приём прогнозов открыт на {self.pick_seconds} с")
         try:
             await asyncio.wait_for(view.done.wait(), timeout=self.pick_seconds)
+            self.trace("Прогнозы дали все ожидаемые игроки")
         except asyncio.TimeoutError:
-            pass
+            self.trace("Время приёма прогнозов вышло")
         finally:                                              # в том числе при остановке игры командой
             view.open = False
             view.stop()
             self.picks = dict(view.picks)
             self.names.update(view.names)
+            self.trace(f"Приём прогнозов закрыт. Принято: {len(self.picks)}")
+            for uid, p in self.picks.items():
+                self.trace(f"  итоговый прогноз: {self.label(uid)} -> {self.pick_label(p)}")
             with suppress(discord.HTTPException):
                 await msg.edit(content=f"🔒 Приём прогнозов закрыт. Принято: {len(self.picks)}", view=None)
 
@@ -122,6 +139,11 @@ class MoreLessGame(MiniGame):
                 right = MORE if n > THRESHOLD else LESS
                 out = {u for u in alive if self.picks.get(u) != right}
                 alive -= out
+                self.trace(f"Выпало {n} ({self.pick_label(right)} — верный прогноз); выбыли: "
+                           + (", ".join(self.label(u) for u in sorted(out)) or "никто")
+                           + f"; осталось: {len(alive)}")
+            else:
+                self.trace(f"Выпало ровно {THRESHOLD}: ничего не происходит, прогнозы сохраняются")
             board = await self.show(board, self._board(history, alive, n, out))
             if len(alive) <= 1:
                 break
@@ -132,6 +154,8 @@ class MoreLessGame(MiniGame):
             silent = alive - self.picks.keys()               # не успели с прогнозом
             if silent:
                 alive -= silent
+                self.trace("Не успели с прогнозом и выбыли: "
+                           + ", ".join(self.label(u) for u in sorted(silent)))
                 note = "⏱ Не успели с прогнозом и выбыли: " + ", ".join(self.nm(u) for u in sorted(silent))
                 board = await self.show(board, self._board(history, alive, n, out, note))
                 if len(alive) <= 1:

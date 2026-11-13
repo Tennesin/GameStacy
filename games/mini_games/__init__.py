@@ -18,8 +18,14 @@ log = logging.getLogger("stacy.mini")
 
 USAGE = ("Использование:\n"
          "  -mini list                                   список мини-игр\n"
-         "  -mini run КОД ID_канала [--seconds N]        запустить (играет любой, кто пишет в канал)\n"
+         "  -mini run КОД ID_канала [--seconds N] [--log True|False]\n"
+         "                                               запустить (играет любой, кто нажмёт кнопку);\n"
+         "                                               --log True — подробный лог событий игры в консоль\n"
+         "                                               (по умолчанию False; просто --log = True)\n"
          "  -mini stop ID_канала                         остановить игру в канале")
+
+_TRUE = {"true", "1", "yes", "on", "да", "y"}
+_FALSE = {"false", "0", "no", "off", "нет", "n"}
 
 # ---------- Консоль (инструмент разработчика) ----------
 
@@ -63,6 +69,18 @@ async def console_mini(bot, args: list):
                 print("⚠ После --seconds нужно число.", flush=True)
                 return
             kwargs["pick_seconds"] = int(args[i + 1])
+        if "--log" in args:
+            i = args.index("--log")
+            val = args[i + 1].lower() if i + 1 < len(args) else None
+            if val is None or val.startswith("--"):
+                kwargs["log"] = True                      # просто «--log» без значения
+            elif val in _TRUE:
+                kwargs["log"] = True
+            elif val in _FALSE:
+                kwargs["log"] = False
+            else:
+                print("⚠ После --log нужно True или False.", flush=True)
+                return
         if key not in manager.games:
             print(f"⚠ Нет мини-игры «{key}». Список: -mini list", flush=True)
             return
