@@ -1,26 +1,65 @@
-"""Мини-игра «Больше или Меньше?»."""
+"""Мини-игра «Больше или Меньше?»: прогноз делается кнопками."""
+import asyncio
+from contextlib import suppress
+
+import discord
+
 from .base import MiniGame
 
 MORE, LESS = "more", "less"
-WORDS = {"больше": MORE, ">": MORE, "меньше": LESS, "<": LESS}
 THRESHOLD = 5               # граница прогноза
 DIE_SIDES = 10              # кубик 1-10
 ROUND_PICK_SECONDS = 15     # время на новый прогноз в следующих раундах
 HISTORY_SHOWN = 12
 
+class PredictView(discord.ui.View):
+    """Две кнопки: «Меньше 5» и «Больше 5». Повторное нажатие меняет прогноз."""
+
+    def __init__(self, game: "MoreLessGame", players):
+        super().__init__(timeout=None)
+        self.game = game
+        self.players = players                # None — может нажимать любой; иначе множество допущенных ID
+        self.picks: dict = {}                 # uid -> MORE / LESS
+        self.names: dict = {}                 # uid -> ник
+        self.done = asyncio.Event()
+        self.open = True
+
+    async def _pick(self, interaction: discord.Interaction, value: str):
+        uid = interaction.user.id
+        if not self.open:
+            await interaction.response.send_message("Приём прогнозов закрыт.", ephemeral=True)
+            return
+        if self.players is not None and uid not in self.players:
+            await interaction.response.send_message("Вы выбыли или не участвуете в этой игре.", ephemeral=True)
+            return
+        self.picks[uid] = value
+        self.names[uid] = interaction.user.display_name
+        await interaction.response.send_message(
+            f"Ваш прогноз: **{self.game.pick_label(value)}**. Пока идёт приём, его можно изменить.",
+            ephemeral=True)
+        if self.players is not None and self.players <= self.picks.keys():
+            self.done.set()                                   # прогноз дали все выжившие
+
+    @discord.ui.button(label="Меньше 5", emoji="⬇️", style=discord.ButtonStyle.danger)
+    async def less_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, LESS)
+
+    @discord.ui.button(label="Больше 5", emoji="⬆️", style=discord.ButtonStyle.success)
+    async def more_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, MORE)
+
 class MoreLessGame(MiniGame):
     key = "highlow"
     title = "Больше или Меньше?"
     rules = ("Прогнозируйте, какое число выпадет на кубике (1-10): **больше** или **меньше** 5. "
-             "Напишите в чат слово **больше** или **меньше** (можно также `>` или `<`).\n"
+             "Нажмите одну из двух кнопок под сообщением.\n"
              "Стейси бросает кубик: кто ошибся, тот выбывает. Если выпало ровно 5, ничего не происходит, "
              "кубик бросается снова с теми же прогнозами. "
              "После каждого броска, который кого-то проверил, выжившие делают новый прогноз "
              "(15 секунд; кто не успел, выбывает).\n"
              "Побеждает тот, кто останется последним. Если выбыли все, победителей нет.")
 
-    def parse_pick(self, text: str):
-        return WORDS.get(text.strip().casefold())
+    prompt = "🔮 **Ваш прогноз:** выпадет число больше или меньше 5?"
 
     def pick_label(self, pick) -> str:
         return "больше 5" if pick == MORE else "меньше 5"
@@ -44,11 +83,31 @@ class MoreLessGame(MiniGame):
             lines.append(note)
         return "\n".join(lines)
 
+    # ---------- Приём прогнозов (заменяет приём сообщений из base.py) ----------
+
+    async def collect_picks(self):
+        """Сообщение с двумя кнопками. Работает и для первого прогноза, и для следующих раундов."""
+        view = PredictView(self, self.players)
+        msg = await self.channel.send(f"{self.prompt}\nВремя: {self.pick_seconds} с.", view=view)
+        try:
+            await asyncio.wait_for(view.done.wait(), timeout=self.pick_seconds)
+        except asyncio.TimeoutError:
+            pass
+        finally:                                              # в том числе при остановке игры командой
+            view.open = False
+            view.stop()
+            self.picks = dict(view.picks)
+            self.names.update(view.names)
+            with suppress(discord.HTTPException):
+                await msg.edit(content=f"🔒 Приём прогнозов закрыт. Принято: {len(self.picks)}", view=None)
+
     async def _next_predictions(self, alive: set):
-        """Новый приём прогнозов только от выживших (используется общий механизм приёма из base.py)."""
+        """Новый приём прогнозов только от выживших."""
         self.players = set(alive)
         self.picks = {}
         self.pick_seconds = ROUND_PICK_SECONDS
+        self.prompt = (f"🔮 **Новый раунд!** Выжившие, сделайте прогноз: "
+                       f"выпадет число больше или меньше {THRESHOLD}?")
         await self.collect_picks()
 
     async def play(self) -> list:
@@ -69,8 +128,6 @@ class MoreLessGame(MiniGame):
             if n == THRESHOLD:
                 continue                                    # ничего не произошло: прогнозы остаются
 
-            await self.channel.send(f"🔮 Новый раунд! Выжившие, сделайте прогноз: **больше** или **меньше** "
-                                    f"({ROUND_PICK_SECONDS} с).")
             await self._next_predictions(alive)
             silent = alive - self.picks.keys()               # не успели с прогнозом
             if silent:

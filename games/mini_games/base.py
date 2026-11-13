@@ -145,7 +145,7 @@ class MiniGame:
     async def run(self) -> MiniResult:
         await self.channel.send(
             f"🎮 **Мини-игра «{self.title}»**\n{self.rules}\n"
-            f"Время на выбор: {self.pick_seconds} с. Передумать можно: считается последнее сообщение.")
+            f"Время на выбор: {self.pick_seconds} с. Передумать можно: считается последний выбор.")
         await self.collect_picks()
         if not self.picks:
             await self.channel.send("😴 Никто не сделал выбор. Мини-игра отменена.")

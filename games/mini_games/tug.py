@@ -1,7 +1,6 @@
-"""Мини-игра «Тяни верёвку!»."""
+"""Мини-игра «Тяни верёвку!»: броски кубика делаются кнопкой 🎲."""
 import asyncio
 import random
-import time
 from contextlib import suppress
 
 import discord
@@ -10,6 +9,51 @@ from .base import MiniGame
 
 DUMMY = -1                                   # «ID» манекена (настоящие ID Discord всегда положительные)
 TEAMS = [("🟥", "Красные"), ("🟦", "Синие")]
+
+class RollView(discord.ui.View):
+    """Одна кнопка 🎲 на всю игру. Между раундами блокируется, на время раунда включается."""
+
+    def __init__(self, game: "TugGame", rollers: set):
+        super().__init__(timeout=None)
+        self.game = game
+        self.rollers = rollers                # ID людей, которые вправе бросать
+        self.rolls: dict = {}                 # uid -> выпавшее число
+        self.all_rolled = asyncio.Event()
+        self.open = False
+        self.rnd = 0
+
+    def begin(self, rnd: int):
+        """Новый раунд: кнопка снова доступна, броски обнулены."""
+        self.rnd = rnd
+        self.rolls = {}
+        self.all_rolled.clear()
+        self.open = True
+        self.roll_button.disabled = False
+
+    def close(self) -> dict:
+        """Конец приёма бросков: кнопка недоступна. Возвращает броски раунда."""
+        self.open = False
+        self.roll_button.disabled = True
+        return dict(self.rolls)
+
+    @discord.ui.button(emoji="🎲", style=discord.ButtonStyle.success)
+    async def roll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        if uid not in self.rollers:
+            await interaction.response.send_message("Вы не участвуете в этой игре.", ephemeral=True)
+            return
+        if not self.open:
+            await interaction.response.send_message("Приём бросков сейчас закрыт.", ephemeral=True)
+            return
+        if uid in self.rolls:
+            await interaction.response.send_message("Вы уже бросили кубик в этом раунде.", ephemeral=True)
+            return
+
+        self.rolls[uid] = random.randint(1, self.game.SIDES)
+        text = self.game._throw_text(self.rnd, len(self.rolls), len(self.rollers))
+        await interaction.response.edit_message(content=text, view=self)
+        if len(self.rolls) >= len(self.rollers):          # сигнал только после ответа на нажатие,
+            self.all_rolled.set()                          # чтобы правка игры не обогнала правку кнопки
 
 class TugGame(MiniGame):
     key = "tug"
@@ -21,8 +65,8 @@ class TugGame(MiniGame):
     rules = ("Чтобы участвовать, отправьте в чат число **1**.\n"
              "Стейси случайно разделит всех на две команды: 🟥 Красные и 🟦 Синие. "
              "Если игроков нечётное количество, к меньшей команде добавится манекен, который тоже бросает кубик.\n"
-             "После сигнала **БРОСОК!** у вас будет 10 секунд: напишите любое сообщение в чат, "
-             "и ваш кубик (1-6) будет брошен. Кто не успел, получает 0.\n"
+             "Под сообщением **БРОСОК!** появится кнопка 🎲: нажмите её в течение 15 секунд, "
+             "и ваш кубик (1-6) будет брошен. Кто не успел, получает 0. Когда нажали все, раунд завершается досрочно.\n"
              "Команда с большей суммой выигрывает раунд. Если очко должно достаться команде, "
              "которая сейчас проигрывает в счёте, оно не прибавляется ей, а снимается с лидера (верёвка тянется назад). "
              "Побеждает команда, первой набравшая 3 очка. Ничья в раунде: верёвка не двигается.")
@@ -58,6 +102,22 @@ class TugGame(MiniGame):
             text = "\n".join(lines + ["", details[0]])
         return text
 
+    def _throw_text(self, rnd: int, done: int, total: int, closed: bool = False) -> str:
+        head = "🎲 **БРОСОК!**" + (f" x{rnd}" if rnd > 1 else "")
+        if closed:
+            return f"{head}\nПриём бросков закрыт: бросили {done} из {total}."
+        return f"{head}\nНажмите кнопку 🎲 (до {self.THROW_SECONDS} с). Бросили: {done}/{total}"
+
+    async def _set_throw(self, msg, text: str, view: RollView):
+        """Правит сообщение с кнопкой; если его удалили, отправляет заново."""
+        if msg is not None:
+            try:
+                await msg.edit(content=text, view=view)
+                return msg
+            except discord.NotFound:
+                pass
+        return await self.channel.send(text, view=view)
+
     # ---------- Логика ----------
 
     def _apply(self, scores: list, winner: int) -> str:
@@ -71,33 +131,6 @@ class TugGame(MiniGame):
         scores[winner] += 1
         return f"{w_icon} {w_name} получают очко"
 
-    async def _ack(self, msg: discord.Message):
-        with suppress(discord.HTTPException):
-            await msg.add_reaction("🎲")
-
-    async def _collect_rolls(self, rollers: set) -> dict:
-        """Ждёт сообщений игроков до THROW_SECONDS; на каждого игрока одно сообщение = один бросок."""
-        rolls: dict = {}
-
-        def check(m: discord.Message) -> bool:
-            return (m.channel.id == self.channel.id and not m.author.bot
-                    and m.author.id in rollers and m.author.id not in rolls)
-
-        deadline = time.monotonic() + self.THROW_SECONDS
-        while len(rolls) < len(rollers):                      # все бросили: ждать до конца времени незачем
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            try:
-                msg = await self.bot.wait_for("message", check=check, timeout=left)
-            except asyncio.TimeoutError:
-                break
-            rolls[msg.author.id] = random.randint(1, self.SIDES)
-            task = asyncio.create_task(self._ack(msg))
-            self._bg.add(task)
-            task.add_done_callback(self._bg.discard)
-        return rolls
-
     async def play(self) -> list:
         players = list(self.picks)
         random.shuffle(players)
@@ -109,32 +142,51 @@ class TugGame(MiniGame):
             self.names[DUMMY] = "Манекен 🤖"
         random.shuffle(teams)                                 # чтобы манекен не всегда оказывался у синих
         rollers = set(players)
+        total = len(rollers)
         scores = [0, 0]
 
+        view = RollView(self, rollers)
+        throw_msg = None
         board = await self.show(None, self._board(teams, scores, []))
+        await self.pause()
         rnd = 0
-        while True:
-            rnd += 1
-            await self.pause()
-            await self.channel.send(f"🎲 **БРОСОК!** Напишите любое сообщение, чтобы бросить кубик "
-                                    f"(время: {self.THROW_SECONDS} с).")
-            rolls = await self._collect_rolls(rollers)
-            if has_dummy:
-                rolls[DUMMY] = random.randint(1, self.SIDES)
+        try:
+            while True:
+                rnd += 1
+                # 1. Кнопка включена, ждём нажатий (или конца времени)
+                view.begin(rnd)
+                throw_msg = await self._set_throw(throw_msg, self._throw_text(rnd, 0, total), view)
+                try:
+                    await asyncio.wait_for(view.all_rolled.wait(), timeout=self.THROW_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
 
-            totals = [sum(rolls.get(u, 0) for u in t) for t in teams]
-            if totals[0] == totals[1]:
-                verdict = "ничья: верёвка не сдвинулась"
-            else:
-                verdict = self._apply(scores, 0 if totals[0] > totals[1] else 1)
-            details = [f"**Раунд {rnd}:** {TEAMS[0][0]} {totals[0]} — {totals[1]} {TEAMS[1][0]} · {verdict}",
-                       self._rolls_line(0, teams, rolls),
-                       self._rolls_line(1, teams, rolls)]
-            board = await self.show(board, self._board(teams, scores, details))
+                # 2. Кнопка выключена, показываем итоги
+                rolls = view.close()
+                throw_msg = await self._set_throw(
+                    throw_msg, self._throw_text(rnd, len(rolls), total, closed=True), view)
+                if has_dummy:
+                    rolls[DUMMY] = random.randint(1, self.SIDES)
 
-            win = next((i for i in (0, 1) if scores[i] >= self.GOAL), None)
-            if win is not None:
-                break
+                totals = [sum(rolls.get(u, 0) for u in t) for t in teams]
+                if totals[0] == totals[1]:
+                    verdict = "ничья: верёвка не сдвинулась"
+                else:
+                    verdict = self._apply(scores, 0 if totals[0] > totals[1] else 1)
+                details = [f"**Раунд {rnd}:** {TEAMS[0][0]} {totals[0]} — {totals[1]} {TEAMS[1][0]} · {verdict}",
+                           self._rolls_line(0, teams, rolls),
+                           self._rolls_line(1, teams, rolls)]
+                board = await self.show(board, self._board(teams, scores, details))
+
+                win = next((i for i in (0, 1) if scores[i] >= self.GOAL), None)
+                if win is not None:
+                    break
+                await self.pause()                            # кнопка остаётся недоступной, пока игроки читают итоги
+        finally:
+            view.stop()                                       # в том числе при остановке игры командой
+            if throw_msg is not None:
+                with suppress(discord.HTTPException):
+                    await throw_msg.edit(view=None)
 
         icon, name = TEAMS[win]
         winners = [u for u in teams[win] if u != DUMMY]
