@@ -1,5 +1,4 @@
 """Мини-игра «Будь ближе!»."""
-
 from .base import MiniGame
 
 class CloserGame(MiniGame):
@@ -17,7 +16,7 @@ class CloserGame(MiniGame):
         order = sorted(scores, key=lambda u: (-scores[u], self.names.get(u, "").casefold()))
         for u in order:
             mark = " ⬅️ +1" if u in near else ""
-            lines.append(f"{self.tag(u)} (загадал {self.picks[u]}): **{scores[u]}/{self.GOAL}**{mark}")
+            lines.append(f"{self.nm(u)} (загадал {self.picks[u]}): **{scores[u]}/{self.GOAL}**{mark}")
         return "\n".join(lines)
 
     async def play(self) -> list:

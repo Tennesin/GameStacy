@@ -1,5 +1,4 @@
 """Мини-игры Стейси. Подключаются как пакет из GAMES; полные игры вызывают их через bot.mini_games.play(...)."""
-
 import asyncio
 
 from .closer import CloserGame
