@@ -28,6 +28,7 @@ CLOCK_SYNC_SECONDS = 300   # сверка с Discord раз в 5 минут
 # Мини-игры
 MINI_ROLL_DELAY = 3        # пауза перед каждым броском кубика, сек
 MINI_PICK_SECONDS = 30     # сколько длится приём выборов, сек
+LOBBY_TIMEOUT_SECONDS = 100
 
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
 GAMES = ["games.mini_games", "games.x_o"]   # мини-игры подключаются первыми

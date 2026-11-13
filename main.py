@@ -5,7 +5,7 @@ import importlib
 import discord
 from discord import app_commands
 
-from config import CLOCK_SYNC_SECONDS, DATA_DIR, DEV_GUILD_ID, GAMES, TOKEN, TZ, TZ_NAME, log
+from config import CLOCK_SYNC_SECONDS, DATA_DIR, GAMES, TOKEN, TZ, TZ_NAME, log
 from core.clock import Clock
 from core.db import MAIN_MIGRATIONS, connect
 from core.errors import report_error
@@ -49,14 +49,9 @@ class StacyBot(discord.Client):
             importlib.import_module(module).setup(self)
             log.info("Игра подключена: %s", module)
 
-        if DEV_GUILD_ID:
-            guild = discord.Object(id=DEV_GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("Команды синхронизированы с тестовым сервером %s", DEV_GUILD_ID)
-        else:
-            await self.tree.sync()
-            log.info("Команды синхронизированы глобально (появятся не сразу)")
+        # Глобальные команды: видны на всех серверах, где есть бот
+        await self.tree.sync()
+        log.info("Команды синхронизированы глобально (на новых серверах могут появиться не сразу)")
 
     async def _clock_loop(self):
         while True:

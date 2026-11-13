@@ -1,16 +1,19 @@
 """Контроллер крестиков-ноликов: правила хода, сообщения, восстановление после перезапуска."""
-
 import asyncio
+import logging
 import random
 from collections import defaultdict
-
+from datetime import datetime
 import discord
 from discord import app_commands
 
+from config import LOBBY_TIMEOUT_SECONDS
 from core.errors import report_error
 from .logic import MARKS, find_win, is_full
 from .storage import Storage
 from .views import BoardView, LobbyView
+
+log = logging.getLogger("stacy.xo")
 
 def mention(uid) -> str:
     return f"<@{uid}>"
@@ -24,6 +27,9 @@ def render(g, note: str = "") -> str:
                if g["player_x"] else "Нужны два игрока. Нажмите «Участвовать».")
         return "\n".join([head, who])
     if status == "aborted":
+        if g["result"] == "timeout":
+            return "\n".join([head, "⌛ Время ожидания вышло: игроки не набрались. Набор закрыт. "
+                                    "Для новой партии используйте /xo."])
         return "\n".join([head, "⚠️ Партия закрыта."])
 
     players = f"{MARKS['X']} {mention(g['player_x'])}   {MARKS['O']} {mention(g['player_o'])}"
@@ -45,30 +51,78 @@ def render(g, note: str = "") -> str:
     return "\n".join(x for x in (head, note, players, tail, extra) if x)
 
 class XOController:
-    def __init__(self, bot, storage: Storage):
+    def __init__(self, bot, storage: Storage, lobby_timeout: int = None):
         self.bot = bot
         self.db = storage
+        self.lobby_timeout = lobby_timeout or LOBBY_TIMEOUT_SECONDS   # сколько ждём второго игрока, сек
         self.locks = defaultdict(asyncio.Lock)      # по блокировке на партию: клики не обгоняют друг друга
+        self.timers: dict = {}                      # game_id -> задача таймера набора
+        self.lobby_views: dict = {}                 # game_id -> View набора (чтобы остановить при закрытии)
 
     # ---------- Запуск и восстановление ----------
 
     async def new_lobby(self, interaction: discord.Interaction):
         game_id = self.db.create(interaction.guild_id, interaction.channel_id)
-        await interaction.response.send_message(render(self.db.get(game_id)),
-                                                view=LobbyView(self, game_id))
+        view = LobbyView(self, game_id)
+        await interaction.response.send_message(render(self.db.get(game_id)), view=view)
         msg = await interaction.original_response()
         self.db.set_message(game_id, msg.id)
+        self.lobby_views[game_id] = view
+        self._schedule_expiry(game_id, self.lobby_timeout)
 
     def restore_views(self):
         """После перезапуска заново подключает кнопки незавершённых партий."""
         for g in self.db.active():
             if g["status"] == "lobby":
                 view = LobbyView(self, g["game_id"])
+                self.lobby_views[g["game_id"]] = view
+                # сколько времени набора осталось с момента создания (оно могло истечь, пока бот был выключен)
+                created = datetime.fromisoformat(g["created_utc"])
+                left = self.lobby_timeout - (self.bot.clock.now() - created).total_seconds()
+                self._schedule_expiry(g["game_id"], max(0.0, left))
             elif g["status"] == "playing":
                 view = BoardView(self, g["game_id"], g["board"])
             else:                                       # окончена, ждёт ответа про реванш
                 view = BoardView(self, g["game_id"], g["board"], locked=True, rematch=True)
             self.bot.add_view(view, message_id=g["message_id"])
+
+    # ---------- Таймер набора ----------
+
+    def _schedule_expiry(self, game_id: int, delay: float):
+        self._cancel_timer(game_id)
+        self.timers[game_id] = asyncio.create_task(self._expire(game_id, delay))
+
+    def _cancel_timer(self, game_id: int):
+        task = self.timers.pop(game_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _expire(self, game_id: int, delay: float):
+        """По истечении времени закрывает набор, если игра так и не началась."""
+        try:
+            await asyncio.sleep(delay)
+            async with self.locks[game_id]:
+                g = self.db.get(game_id)
+                if g is None or g["status"] != "lobby":
+                    return                                  # игра уже началась или закрыта
+                self.db.abort(game_id, "timeout")
+                view = self.lobby_views.pop(game_id, None)
+                if view is not None:
+                    view.stop()
+                if g["message_id"]:
+                    try:
+                        channel = self.bot.get_partial_messageable(g["channel_id"])
+                        await channel.get_partial_message(g["message_id"]).edit(
+                            content=render(self.db.get(game_id)), view=None)
+                    except discord.HTTPException:
+                        log.exception("Не удалось обновить сообщение закрытого набора #%s", game_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Сбой таймера набора #%s", game_id)
+        finally:
+            if self.timers.get(game_id) is asyncio.current_task():
+                self.timers.pop(game_id, None)
 
     # ---------- Набор игроков ----------
 
@@ -94,6 +148,8 @@ class XOController:
             if random.random() < 0.5:
                 first, second = second, first
             self.db.start(game_id, first, second)
+            self._cancel_timer(game_id)                 # набор завершён: таймер больше не нужен
+            self.lobby_views.pop(game_id, None)
             await interaction.response.edit_message(
                 content=render(self.db.get(game_id), "🪙 Монета брошена!"),
                 view=BoardView(self, game_id))
@@ -201,6 +257,8 @@ class XOController:
 
     async def fail(self, interaction: discord.Interaction, game_id: int, error: BaseException):
         """Нештатный сбой: сессия закрывается, в Discord извинение, в консоли Traceback."""
+        self._cancel_timer(game_id)
+        self.lobby_views.pop(game_id, None)
         self.db.abort(game_id, "error")
         await report_error(interaction, error,
                            closing_text="⚠️ Партия закрыта из-за технической ошибки.")
