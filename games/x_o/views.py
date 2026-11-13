@@ -27,14 +27,7 @@ class BoardView(discord.ui.View):
         self.ctrl, self.game_id = ctrl, game_id
         win = find_win(board) or ()
         for i, ch in enumerate(board):
-            if i in win:
-                style = discord.ButtonStyle.success
-            elif ch == "X":
-                style = discord.ButtonStyle.danger
-            elif ch == "O":
-                style = discord.ButtonStyle.primary
-            else:
-                style = discord.ButtonStyle.secondary
+            style = discord.ButtonStyle.success if i in win else discord.ButtonStyle.secondary
             btn = discord.ui.Button(
                 style=style,
                 label="\u200b" if ch == EMPTY else None,
