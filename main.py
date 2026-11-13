@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib
-
 import discord
 from discord import app_commands
 
@@ -10,6 +9,7 @@ from config import CLOCK_SYNC_SECONDS, DATA_DIR, DEV_GUILD_ID, GAMES, TOKEN, TZ,
 from core.clock import Clock
 from core.db import MAIN_MIGRATIONS, connect
 from core.errors import report_error
+from core.console import start_console
 
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     await report_error(interaction, getattr(error, "original", error))
@@ -29,16 +29,20 @@ def register_commands(bot: "StacyBot"):
 
 class StacyBot(discord.Client):
     def __init__(self):
-        super().__init__(intents=discord.Intents.default())     # привилегированные интенты не нужны
+        intents = discord.Intents.default()
+        intents.message_content = True          # привилегированный
+        super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = on_tree_error
         self.db = connect(DATA_DIR / "stacy.db", MAIN_MIGRATIONS)
         self.clock = Clock(TZ, self.db)
+        self.console_commands = {}
         self._clock_task = None
 
     async def setup_hook(self):
         await self.clock.sync()                                 # мгновенная сверка при запуске
         self._clock_task = asyncio.create_task(self._clock_loop())
+        start_console(self)
 
         register_commands(self)
         for module in GAMES:

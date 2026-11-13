@@ -25,9 +25,12 @@ TZ_NAME = "Asia/Tashkent"
 TZ = ZoneInfo(TZ_NAME)
 
 CLOCK_SYNC_SECONDS = 300   # сверка с Discord раз в 5 минут
+# Мини-игры
+MINI_ROLL_DELAY = 3        # пауза перед каждым броском кубика, сек
+MINI_PICK_SECONDS = 30     # сколько длится приём выборов, сек
 
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
-GAMES = ["games.x_o"]
+GAMES = ["games.mini_games", "games.x_o"]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stacy")
