@@ -22,7 +22,8 @@ class LobbyView(discord.ui.View):
         self.stop()
 
 class BoardView(discord.ui.View):
-    def __init__(self, ctrl, game_id: int, board: str = EMPTY * 9, locked: bool = False):
+    def __init__(self, ctrl, game_id: int, board: str = EMPTY * 9,
+                 locked: bool = False, rematch: bool = False):
         super().__init__(timeout=None)
         self.ctrl, self.game_id = ctrl, game_id
         win = find_win(board) or ()
@@ -39,10 +40,28 @@ class BoardView(discord.ui.View):
             btn.callback = self._make_callback(i)
             self.add_item(btn)
 
+        if rematch:                                   # партия окончена, ждём решения про реванш
+            again = discord.ui.Button(label="Заново", style=discord.ButtonStyle.success,
+                                      custom_id=f"xo:{game_id}:again", row=3)
+            again.callback = self._on_again
+            quit_ = discord.ui.Button(label="Отказ", style=discord.ButtonStyle.danger,
+                                      custom_id=f"xo:{game_id}:quit", row=3)
+            quit_.callback = self._on_quit
+            self.add_item(again)
+            self.add_item(quit_)
+
     def _make_callback(self, cell: int):
         async def callback(interaction: discord.Interaction):
             await self.ctrl.move(interaction, self.game_id, cell)
         return callback
+
+    async def _on_again(self, interaction: discord.Interaction):
+        if await self.ctrl.rematch_vote(interaction, self.game_id):    # True — реванш начался
+            self.stop()
+
+    async def _on_quit(self, interaction: discord.Interaction):
+        if await self.ctrl.rematch_decline(interaction, self.game_id):  # True — связка распущена
+            self.stop()
 
     async def on_error(self, interaction, error, item):
         await self.ctrl.fail(interaction, self.game_id, error)

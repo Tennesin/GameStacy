@@ -28,6 +28,11 @@ MIGRATIONS = [
         PRIMARY KEY (game_id, n)
     );
     """,
+    """
+    ALTER TABLE games ADD COLUMN rematch INTEGER NOT NULL DEFAULT 0;   -- 0 нет, 1 ждём, 2 отказ, 3 состоялся
+    ALTER TABLE games ADD COLUMN ready_x INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE games ADD COLUMN ready_o INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 class Storage:
@@ -56,8 +61,10 @@ class Storage:
         return self.con.execute("SELECT * FROM games WHERE game_id=?", (game_id,)).fetchone()
 
     def active(self) -> list:
+        """Партии, чьи кнопки нужно восстановить: набор, игра, либо окончена и ждёт ответа про реванш."""
         return self.con.execute(
-            "SELECT * FROM games WHERE status IN ('lobby', 'playing') AND message_id IS NOT NULL"
+            "SELECT * FROM games WHERE message_id IS NOT NULL AND "
+            "(status IN ('lobby', 'playing') OR (status = 'finished' AND rematch = 1))"
         ).fetchall()
 
     def set_message(self, game_id: int, message_id: int):
@@ -78,8 +85,28 @@ class Storage:
             self.con.execute("INSERT INTO moves VALUES (?, ?, ?, ?, ?)",
                              (game_id, n, user_id, cell, now))
             self.con.execute(
-                "UPDATE games SET board=?, turn=?, status=?, result=?, updated_utc=? WHERE game_id=?",
-                (board, turn, status, result, now, game_id))
+                "UPDATE games SET board=?, turn=?, status=?, result=?, rematch=?, updated_utc=? "
+                "WHERE game_id=?",
+                (board, turn, status, result, 1 if status == "finished" else 0, now, game_id))
 
     def abort(self, game_id: int, reason: str):
         self._set(game_id, status="aborted", result=reason, turn=None)
+
+    def vote_rematch(self, game_id: int, seat: str):
+        """seat: 'X' или 'O' — место игрока в завершённой партии."""
+        self._set(game_id, **{"ready_x" if seat == "X" else "ready_o": 1})
+
+    def set_rematch(self, game_id: int, state: int):
+        self._set(game_id, rematch=state)
+
+    def restart(self, old_id: int, player_x: int, player_o: int) -> int:
+        """Новая партия тех же игроков в том же сообщении."""
+        now = self._now()
+        old = self.get(old_id)
+        with self.con:
+            self.con.execute("UPDATE games SET rematch=3, updated_utc=? WHERE game_id=?", (now, old_id))
+            cur = self.con.execute(
+                "INSERT INTO games (guild_id, channel_id, message_id, status, player_x, player_o, "
+                "turn, created_utc, updated_utc) VALUES (?, ?, ?, 'playing', ?, ?, 'X', ?, ?)",
+                (old["guild_id"], old["channel_id"], old["message_id"], player_x, player_o, now, now))
+        return cur.lastrowid
