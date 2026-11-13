@@ -4,7 +4,9 @@ import asyncio
 from .closer import CloserGame
 from .manager import MiniGameManager
 from .mines import MinesGame
+from .more_less import MoreLessGame
 from .pairs import PairsGame
+from .tug import TugGame
 
 USAGE = ("Использование:\n"
          "  -mini list                                   список мини-игр\n"
@@ -73,6 +75,6 @@ async def console_mini(bot, args: list):
 def setup(bot):
     manager = MiniGameManager(bot)
     bot.mini_games = manager
-    for cls in (PairsGame, MinesGame, CloserGame):
+    for cls in (PairsGame, MinesGame, CloserGame, TugGame, MoreLessGame):
         manager.register(cls)
     bot.console_commands["-mini"] = console_mini

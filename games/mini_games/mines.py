@@ -12,7 +12,8 @@ class MinesGame(MiniGame):
     rules = ("Выберите любое число от **1 до 5** и отправьте его в чат.\n"
              "Стейси будет случайно выбирать числа: кто выбрал попавшееся число, тот выбывает. "
              "Одно и то же число может выпасть несколько раз. "
-             "Побеждает тот, кто останется последним.")
+             "Побеждает тот, кто останется последним. "
+             "Если все оставшиеся выбыли одновременно, победителей нет.")
 
     def _board(self, history: list, alive: set, last, hit: set) -> str:
         lines = ["💣 **Осторожно, мины!**"]
@@ -36,13 +37,11 @@ class MinesGame(MiniGame):
             n = random.randint(self.pick_min, self.pick_max)    # без «выбывания» клеток: шанс всегда одинаковый
             history.append(n)
             hit = {u for u in alive if self.picks[u] == n}
-            if hit == alive and len(alive) >= 2:
-                # Все оставшиеся выбыли бы одновременно: они продержались дольше всех, победа общая
-                await self.show(board, self._board(history, alive, n, set()))
-                await self.channel.send(f"💥 Число {n} накрыло всех оставшихся сразу: победа делится.")
-                return sorted(alive)
             alive -= hit
             board = await self.show(board, self._board(history, alive, n, hit))
+            if not alive:
+                await self.channel.send(f"💥 Число {n} накрыло всех оставшихся сразу: победителей нет.")
+                return []
             if len(alive) <= 1:
                 break
         return sorted(alive)
