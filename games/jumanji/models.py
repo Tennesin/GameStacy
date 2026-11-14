@@ -1,5 +1,4 @@
 """Формат карты Джуманджи: ячейки, координаты, чтение и запись JSON, обход маршрута."""
-
 import json
 import re
 from dataclasses import dataclass, field

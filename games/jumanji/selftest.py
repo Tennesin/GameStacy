@@ -1,5 +1,4 @@
 """Самопроверка движка и валидатора. Запуск из корня проекта:  python -m games.jumanji.selftest"""
-
 import random
 
 from .logic import Match, Player, Track, effective_bots

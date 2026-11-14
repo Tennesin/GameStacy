@@ -6,9 +6,8 @@
   таймер хода:  events = match.roll(timed_out=True)
   мини-игра:    если match.awaiting_minigame — провести её и вызвать match.finish_minigame(winners)
   каждый вызов возвращает список Event; табло и тексты строит слой Discord."""
-
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 from .models import GameMap, MapFormatError, trace_path
@@ -125,6 +124,37 @@ class Match:
         self.standings: list = []
         self._finish_count = 0
         self._leave_count = 0
+
+    # ---------- Сохранение и восстановление ----------
+
+    def snapshot(self) -> dict:
+        """Всё состояние партии простыми значениями (для JSON в БД)."""
+        return {
+            "players": [asdict(p) for p in self.players],
+            "current": self.current,
+            "extra_in_row": self.extra_in_row,
+            "awaiting_minigame": self.awaiting_minigame,
+            "over": self.over,
+            "standings": [p.pid for p in self.standings],
+            "finish_count": self._finish_count,
+            "leave_count": self._leave_count,
+        }
+
+    @classmethod
+    def restore(cls, track: Track, data: dict, rng: Optional[random.Random] = None) -> "Match":
+        """Собирает партию из snapshot(). Проверок состава нет: данные написаны самим движком."""
+        m = cls.__new__(cls)
+        m.track = track
+        m.players = [Player(**d) for d in data["players"]]
+        m.rng = rng or random.Random()
+        m.current = int(data["current"])
+        m.extra_in_row = int(data["extra_in_row"])
+        m.awaiting_minigame = bool(data["awaiting_minigame"])
+        m.over = bool(data["over"])
+        m.standings = [m.get(pid) for pid in data["standings"]]
+        m._finish_count = int(data["finish_count"])
+        m._leave_count = int(data["leave_count"])
+        return m
 
     # ---------- Справка ----------
 
