@@ -158,7 +158,7 @@ class TugGame(MiniGame):
             teams[1].append(DUMMY)
             self.names[DUMMY] = "Манекен 🤖"
         random.shuffle(teams)                                 # чтобы манекен не всегда оказывался у синих
-        rollers = set(players)
+        rollers = {u for u in players if u not in self.bots}
         total = len(rollers)
         scores = [0, 0]
         for i in (0, 1):
@@ -189,6 +189,10 @@ class TugGame(MiniGame):
                 self.trace(f"Раунд {rnd}: приём бросков закрыт ({reason}); бросили {len(rolls)} из {total}")
                 for u in rollers - rolls.keys():
                     self.trace(f"  {self.label(u)} не бросил: 0 очков")
+                for b in players:
+                    if b in self.bots:
+                        rolls[b] = random.randint(1, self.SIDES)
+                        self.trace(f"Раунд {rnd}: бот {self.label(b)} бросил кубик, выпало {rolls[b]}")
                 throw_msg = await self._set_throw(
                     throw_msg, self._throw_text(rnd, len(rolls), total, closed=True), view)
                 if has_dummy:

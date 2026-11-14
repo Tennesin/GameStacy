@@ -1,11 +1,12 @@
 """Чистая логика Джуманджи: маршрут, правила хода, партия. Про Discord и БД ничего не знает.
 
-Как этим пользоваться из Discord (позже):
+Как этим пользоваться из Discord:
   match = Match(Track(game_map), players);  events = match.start()
   ход игрока:   events = match.roll()              (по кнопке «🎲»)
   таймер хода:  events = match.roll(timed_out=True)
   мини-игра:    если match.awaiting_minigame — провести её и вызвать match.finish_minigame(winners)
   каждый вызов возвращает список Event; табло и тексты строит слой Discord."""
+
 import random
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -91,6 +92,7 @@ class Player:
     left: bool = False
     leave_order: int = 0
     place: Optional[int] = None
+    bonus: Optional[str] = None  # награда мини-игры на следующий ход: "x2" или "double_roll"
 
     @property
     def on_map(self) -> bool:
@@ -99,7 +101,8 @@ class Player:
 @dataclass
 class Event:
     """kind: turn, roll, blocked, move, jump, back, reset, skip_set, skip_used, charge, charge_denied,
-    minigame, reward, reward_none, reward_move, finished, timeout, left, joined, game_over."""
+    minigame, reward, reward_none, reward_move, bonus_set, bonus_roll, finished, timeout, left, joined,
+    game_over."""
     kind: str
     pid: int = 0
     data: dict = field(default_factory=dict)
@@ -119,6 +122,7 @@ class Match:
         self.rng = rng or random.Random()
         self.current = 0
         self.extra_in_row = 0
+        self.bonus_rolls = 0                 # сколько бонусных бросков осталось у ходящего («два броска подряд»)
         self.awaiting_minigame = False
         self.over = False
         self.standings: list = []
@@ -133,6 +137,7 @@ class Match:
             "players": [asdict(p) for p in self.players],
             "current": self.current,
             "extra_in_row": self.extra_in_row,
+            "bonus_rolls": self.bonus_rolls,
             "awaiting_minigame": self.awaiting_minigame,
             "over": self.over,
             "standings": [p.pid for p in self.standings],
@@ -149,6 +154,7 @@ class Match:
         m.rng = rng or random.Random()
         m.current = int(data["current"])
         m.extra_in_row = int(data["extra_in_row"])
+        m.bonus_rolls = int(data.get("bonus_rolls", 0))
         m.awaiting_minigame = bool(data["awaiting_minigame"])
         m.over = bool(data["over"])
         m.standings = [m.get(pid) for pid in data["standings"]]
@@ -217,12 +223,16 @@ class Match:
         if RESET_TIMEOUTS_ON_ROLL:
             p.timeouts = 0
         d = self.rng.randint(1, DICE_SIDES)
-        step = roll_outcome(self.track, p.pos, d)
-        ev = [Event("roll", p.pid, {"d": d})]
+        bonus, p.bonus = p.bonus, None                        # награда мини-игры тратится на первом броске хода
+        mult = 2 if bonus == "x2" else 1
+        if bonus == "double_roll":
+            self.bonus_rolls += 1
+        step = roll_outcome(self.track, p.pos, d * mult)
+        ev = [Event("roll", p.pid, {"d": d, "mult": mult, "total": d * mult})]
 
         if step.blocked:
-            ev.append(Event("blocked", p.pid, {"d": d, "left": self.track.finish - p.pos}))
-            return ev + self._pass_turn()
+            ev.append(Event("blocked", p.pid, {"d": d * mult, "left": self.track.finish - p.pos}))
+            return ev + self._end_roll(p)
 
         p.pos = step.landed
         ev.append(Event("move", p.pid, {"from": step.start, "to": step.landed}))
@@ -246,10 +256,11 @@ class Match:
             ev.append(Event("minigame", p.pid,
                             {"players": [q.pid for q in self.players if q.on_map]}))
             return ev
-        return ev + self._pass_turn()
+        return ev + self._end_roll(p)
 
     def finish_minigame(self, winners: list) -> list:
-        """Завершает мини-игру на клетке: случайная награда победителям, затем ход переходит дальше."""
+        """Завершает мини-игру на клетке: случайная награда победителям, затем ход идёт дальше
+        (или ходящий добирает бонусный бросок, если он у него остался)."""
         if not self.awaiting_minigame:
             raise RuntimeError("Мини-игра не запускалась.")
         self.awaiting_minigame = False
@@ -264,7 +275,7 @@ class Match:
             ev.append(Event("reward", 0, {"title": reward["title"], "kind": reward["kind"],
                                            "winners": win}))
             ev += self._apply_reward(reward, win)
-        return ev + self._pass_turn()
+        return ev + self._end_roll(self.current_player)
 
     # ---------- Внутреннее ----------
 
@@ -284,13 +295,20 @@ class Match:
                 if new != p.pos:
                     ev.append(Event("reward_move", p.pid, {"from": p.pos, "to": new}))
                     p.pos = new
-        elif kind == "skip_others":
-            for p in others:
-                p.skip += 1
-                ev.append(Event("skip_set", p.pid))
+        elif kind in ("double_roll", "x2"):
+            for pid in winners:
+                self.get(pid).bonus = kind
+                ev.append(Event("bonus_set", pid, {"bonus": kind}))
         else:
             raise ValueError(f"Неизвестный тип награды: {kind}")
         return ev
+
+    def _end_roll(self, p: Player) -> list:
+        """Конец броска: либо бонусный бросок тому же игроку, либо ход переходит дальше."""
+        if self.bonus_rolls > 0 and p.on_map and not self.over:
+            self.bonus_rolls -= 1
+            return [Event("bonus_roll", p.pid)]
+        return self._pass_turn()
 
     def _finish(self, p: Player) -> list:
         p.finished = True
@@ -316,6 +334,7 @@ class Match:
 
     def _pass_turn(self) -> list:
         self.extra_in_row = 0
+        self.bonus_rolls = 0
         if self._check_end():
             return self._finalize()
         ev, i, n = [], self.current, len(self.players)

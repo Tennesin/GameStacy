@@ -61,7 +61,7 @@ class PickView(discord.ui.View):
             await interaction.response.send_message(
                 f"Ваш выбор: **{game.pick_label(value)}**. Пока идёт приём, его можно изменить.",
                 ephemeral=True)
-            if game.players is not None and game.players <= self.picks.keys():
+            if game.players is not None and (game.players - game.bots) <= self.picks.keys():
                 self.done.set()
         return callback
 
@@ -81,7 +81,7 @@ class MiniGame:
     pick_max = 1
     pick_row_width = 5          # кнопок в ряду (максимум 5)
 
-    def __init__(self, bot, channel, players=None, pick_seconds=None, roll_delay=None, log=False):
+    def __init__(self, bot, channel, players=None, pick_seconds=None, roll_delay=None, log=False, bots=None):
         self.bot = bot
         self.channel = channel
         self.players = set(players) if players else None     # None — играет любой, кто нажмёт кнопку
@@ -90,6 +90,9 @@ class MiniGame:
         self.log_enabled = bool(log)                          # подробный лог в консоль (только из консоли)
         self.picks: dict = {}       # uid -> выбранное число
         self.names: dict = {}       # uid -> ник на сервере
+        self.bots: set = set(bots or ())               # боты: выбирают случайно, кнопок у них нет
+        if bots:
+            self.names.update(bots)
         self.stopped = False        # остановлена командой
         self._bg: set = set()
 
@@ -176,6 +179,14 @@ class MiniGame:
             lines.append(f"{self.nm(uid)} — {self.pick_label(p)}")
         return "\n".join(lines)
 
+    def fill_bots(self, ids=None):
+        """Боты делают случайный выбор (только те, кто ещё не выбрал)."""
+        options = [value for _label, value in self.pick_buttons()]
+        for b in sorted(self.bots if ids is None else ids):
+            if b in self.bots and b not in self.picks:
+                self.picks[b] = random.choice(options)
+                self.trace(f"Бот {self.label(b)} выбрал случайно: {self.pick_label(self.picks[b])}")
+
     # ---------- Приём выборов (кнопки) ----------
 
     async def collect_picks(self):
@@ -233,6 +244,7 @@ class MiniGame:
             self.trace("Никто не сделал выбор: игра отменена")
             await self.channel.send("😴 Никто не сделал выбор. Мини-игра отменена.")
             return MiniResult([], self.names, aborted=True)
+        self.fill_bots()
         await self.channel.send(self.picks_text())
         self.trace("Начало игры (play)")
         winners = await self.play()

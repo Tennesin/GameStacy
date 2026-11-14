@@ -31,7 +31,7 @@ MINI_PICK_SECONDS = 30     # сколько длится приём выборо
 LOBBY_TIMEOUT_SECONDS = 100
 
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
-GAMES = ["games.mini_games", "games.x_o"]   # мини-игры подключаются первыми
+GAMES = ["games.mini_games", "games.x_o", "games.jumanji"]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stacy")

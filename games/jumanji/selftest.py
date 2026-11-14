@@ -45,6 +45,43 @@ def play_random(track: Track, seed: int):
     assert match.over, "партия не закончилась"
     assert sorted(p.place for p in match.players) == list(range(1, len(players) + 1))
 
+class FixedRng(random.Random):
+    """Кубик с заранее заданными значениями."""
+    def __init__(self, *vals):
+        super().__init__()
+        self.vals = list(vals)
+
+    def randint(self, a, b):
+        return self.vals.pop(0)
+
+def test_bonuses():
+    track = Track(make_line(20))
+
+    m = Match(track, [Player(1, "A"), Player(2, "B")], FixedRng(3))
+    m.start()
+    m.players[0].bonus = "x2"
+    m.roll()
+    assert m.players[0].pos == 6 and m.players[0].bonus is None and m.current_player.pid == 2
+
+    m = Match(track, [Player(1, "A"), Player(2, "B")], FixedRng(2, 3))
+    m.start()
+    m.players[0].bonus = "double_roll"
+    ev = m.roll()
+    assert m.players[0].pos == 2 and m.current_player.pid == 1 and any(e.kind == "bonus_roll" for e in ev)
+    m.roll()
+    assert m.players[0].pos == 5 and m.current_player.pid == 2
+
+    m = Match(track, [Player(1, "A"), Player(2, "B")])
+    m.players[1].pos = 1
+    m._apply_reward({"kind": "back_others", "n": 2}, [1])
+    assert m.players[1].pos == 0
+    m._apply_reward({"kind": "x2"}, [1])
+    assert m.players[0].bonus == "x2"
+
+    snap = m.snapshot()
+    assert Match.restore(track, snap).snapshot() == snap
+    print("бонусы наград: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -73,6 +110,7 @@ def main():
     track = Track(good)
     for seed in range(300):
         play_random(track, seed)
+    test_bonuses()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

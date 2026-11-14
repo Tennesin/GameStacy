@@ -56,7 +56,7 @@ MIGRATIONS = [
     """,
 ]
 
-_GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "status", "solo", "bots", "map_id",
+_GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "host_id", "status", "solo", "bots", "map_id",
                 "map_name", "map_json", "state_json", "turn_deadline_utc", "result"}
 
 class Storage:
@@ -147,6 +147,9 @@ class Storage:
             self._set(game_id, message_id=message_id)
         else:
             self._set(game_id, message_id=message_id, channel_id=channel_id)
+
+    def set_host(self, game_id: int, host_id: int):
+        self._set(game_id, host_id=host_id)
 
     def update_settings(self, game_id: int, solo: Optional[bool] = None,
                         bots: Optional[int] = None, map_id: Optional[int] = None):

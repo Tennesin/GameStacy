@@ -24,6 +24,10 @@ class PredictView(discord.ui.View):
         self.done = asyncio.Event()
         self.open = True
 
+    def _need(self):
+        """Кого ждём: люди из списка допущенных (боты кнопок не нажимают). None — может нажимать любой."""
+        return None if self.players is None else self.players - self.game.bots
+
     async def _pick(self, interaction: discord.Interaction, value: str):
         uid = interaction.user.id
         who = f"{interaction.user.display_name} ({uid})"
@@ -45,8 +49,9 @@ class PredictView(discord.ui.View):
         await interaction.response.send_message(
             f"Ваш прогноз: **{self.game.pick_label(value)}**. Пока идёт приём, его можно изменить.",
             ephemeral=True)
-        if self.players is not None and self.players <= self.picks.keys():
-            self.done.set()                                   # прогноз дали все выжившие
+        need = self._need()
+        if need is not None and need <= self.picks.keys():
+            self.done.set()
 
     async def on_error(self, interaction, error, item):
         who = f"{interaction.user.display_name} ({interaction.user.id})"
@@ -76,6 +81,9 @@ class MoreLessGame(MiniGame):
     def pick_label(self, pick) -> str:
         return "больше 5" if pick == MORE else "меньше 5"
 
+    def pick_buttons(self) -> list:
+        return [("Меньше 5", LESS), ("Больше 5", MORE)]
+
     def _board(self, history: list, alive: set, last, out: set, note: str = "") -> str:
         lines = ["🔮 **Больше или Меньше?**"]
         if last is not None:
@@ -100,6 +108,9 @@ class MoreLessGame(MiniGame):
     async def collect_picks(self):
         """Сообщение с двумя кнопками. Работает и для первого прогноза, и для следующих раундов."""
         view = PredictView(self, self.players)
+        need = view._need()
+        if need is not None and not need:
+            view.done.set()
         msg = await self.channel.send(f"{self.prompt}\nВремя: {self.pick_seconds} с.", view=view)
         self.trace(f"Приём прогнозов открыт на {self.pick_seconds} с")
         try:
@@ -112,6 +123,8 @@ class MoreLessGame(MiniGame):
             view.stop()
             self.picks = dict(view.picks)
             self.names.update(view.names)
+            if self.players is not None:
+                self.fill_bots(self.players & self.bots)      # выжившие боты прогнозируют случайно
             self.trace(f"Приём прогнозов закрыт. Принято: {len(self.picks)}")
             for uid, p in self.picks.items():
                 self.trace(f"  итоговый прогноз: {self.label(uid)} -> {self.pick_label(p)}")

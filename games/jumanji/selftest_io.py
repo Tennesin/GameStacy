@@ -119,6 +119,7 @@ def test_render():
     out = Path("jumanji_preview")
     out.mkdir(exist_ok=True)
     good = snake(24, GOOD_EFFECTS)
+    (out / "sample_map.json").write_text(good.to_json(), encoding="utf-8")
     path = [c for c in good.cells]                                                     # порядок для текста ниже
     av = [fake_avatar(c) for c in ((200, 80, 80), (80, 160, 220), (90, 190, 120), (230, 190, 60))]
 
