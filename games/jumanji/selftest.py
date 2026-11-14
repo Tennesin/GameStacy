@@ -82,6 +82,28 @@ def test_bonuses():
     assert Match.restore(track, snap).snapshot() == snap
     print("бонусы наград: OK")
 
+def test_editor_helpers():
+    from .editor import initial_tail, parse_cells, place_cells, remove_cell
+    m = GameMap(name="T", width=10, height=8)
+
+    ids, err = parse_cells("a1-c1 C2, а3", m)            # последняя «а» русская
+    assert err is None and ids == ["A1", "B1", "C1", "C2", "A3"], ids
+    assert parse_cells("K1", m)[1] and parse_cells("A1-B2", m)[1] and parse_cells("zz", m)[1]
+    assert parse_cells("C1-A1", m)[0] == ["C1", "B1", "A1"]
+
+    added, skipped, tail = place_cells(m, ["A1", "B1", "C1"], None)
+    assert m.start == "A1" and m.cells["A1"].next == "B1" and m.cells["B1"].next == "C1" and tail == "C1"
+    added, skipped, tail = place_cells(m, ["C1", "D1"], tail)
+    assert added == ["D1"] and skipped == ["C1"] and m.cells["C1"].next == "D1" and tail == "D1"
+    assert initial_tail(m) == "D1"
+
+    m.cells["D1"].effect, m.cells["D1"].target = "jump", "B1"
+    remove_cell(m, "B1")
+    assert m.cells["A1"].next is None and m.cells["D1"].target is None
+    remove_cell(m, "A1")
+    assert m.start is None
+    print("помощники редактора: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -111,6 +133,7 @@ def main():
     for seed in range(300):
         play_random(track, seed)
     test_bonuses()
+    test_editor_helpers()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

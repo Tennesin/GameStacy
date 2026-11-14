@@ -24,6 +24,7 @@ from .render import BOT_COLOR_NAMES, make_tokens, render_board_async
 from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
                     MIN_PLAYERS, MINI_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
 from .storage import Storage
+from .editor import EditorController
 from .validator import validate_map
 from .views import LobbyView, PlayView
 
@@ -679,9 +680,15 @@ class JumanjiController:
 JMAP_USAGE = ("Использование:\n"
               "  -jmap list                   список готовых карт\n"
               "  -jmap import ПУТЬ_К_JSON     проверить карту и добавить в список для игроков\n"
-              "  -jmap delete ID_карты        удалить карту из списка")
+              "                               (путь в кавычках или с прямыми слэшами)\n"
+              "  -jmap delete ID_карты        удалить карту из списка\n"
+              "  -jmap edit ID_канала [--gameid ID_канала] [название]\n"
+              "                               открыть редактор карты в канале или ветке\n"
+              "  -jmap drafts                 список черновиков редактора\n"
+              "  -jmap sessions               открытые редакторы\n"
+              "  -jmap close ID_сессии        закрыть редактор")
 
-def _console_jmap(ctrl: JumanjiController):
+def _console_jmap(ctrl: JumanjiController, editor: EditorController):
     async def handler(bot, args: list):
         if not args:
             print(JMAP_USAGE, flush=True)
@@ -706,6 +713,17 @@ def _console_jmap(ctrl: JumanjiController):
                 print(f"✔ Карта «{gmap.name}» добавлена (ID {map_id}).", flush=True)
         elif sub == "delete" and len(args) >= 2 and args[1].isdigit():
             print("✔ Удалена." if ctrl.db.delete_map(int(args[1])) else "⚠ Такой карты нет.", flush=True)
+        elif sub == "edit":
+            await editor.console_edit(bot, args[1:])
+        elif sub == "drafts":
+            rows = ctrl.db.list_drafts()
+            for r in rows:
+                print(f"  {r['name']}  (изменён {str(r['updated_utc'])[:16]})", flush=True)
+            print(f"Черновиков: {len(rows)}", flush=True)
+        elif sub == "sessions":
+            editor.console_sessions()
+        elif sub == "close" and len(args) >= 2 and args[1].isdigit():
+            await editor.console_close(int(args[1]))
         else:
             print(JMAP_USAGE, flush=True)
     return handler
@@ -716,8 +734,10 @@ def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = JumanjiController(bot, Storage(bot.clock))
     ctrl.restore_views()
+    editor = EditorController(bot, ctrl.db)
+    editor.restore_views()
     bot.full_games["jumanji"] = FullGame("jumanji", "Джуманджи", ctrl.launch)
-    bot.console_commands["-jmap"] = _console_jmap(ctrl)
+    bot.console_commands["-jmap"] = _console_jmap(ctrl, editor)
 
     @app_commands.command(name="jumanji", description="Джуманджи: открыть набор на партию")
     @app_commands.guild_only()

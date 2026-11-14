@@ -232,14 +232,18 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
 
     R = RADIUS * SS
 
-    # пустые места сетки
+    # подписи координат и пустые места сетки (только в редакторе)
     if show_grid:
+        label_font, _ = _font(13 * SS)
         for gx in range(x0, x1 + 1):
             for gy in range(y0, y1 + 1):
                 cx = ((gx - x0) * CELL + CELL / 2 + PAD) * SS
                 cy = ((gy - y0) * CELL + CELL / 2 + PAD) * SS
-                if f"{chr(65 + gx)}{gy + 1}" not in m.cells:
+                cid = f"{chr(65 + gx)}{gy + 1}"
+                if cid not in m.cells:
                     d.ellipse((cx - 6 * SS, cy - 6 * SS, cx + 6 * SS, cy + 6 * SS), fill=(80, 84, 92, 255))
+                d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
+                       font=label_font, fill=(125, 130, 140, 255))
 
     # пунктир прыжков и откатов
     for cid, c in m.cells.items():
