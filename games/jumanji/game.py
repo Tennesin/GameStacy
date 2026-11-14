@@ -67,13 +67,18 @@ class JumanjiController:
 
     # ==================== Запуск ====================
 
+    def _default_map_id(self) -> Optional[int]:
+        maps = self.db.list_maps()
+        return maps[0]["map_id"] if len(maps) == 1 else None
+
     async def new_lobby(self, interaction: discord.Interaction):
         """Слеш-команда /jumanji: хост — тот, кто её вызвал."""
         if not self.db.list_maps():
             await interaction.response.send_message("Готовых карт пока нет: играть не на чем.", ephemeral=True)
             return
         user = interaction.user
-        game_id = self.db.create_game(interaction.guild_id, interaction.channel_id, user.id)
+        game_id = self.db.create_game(interaction.guild_id, interaction.channel_id, user.id,
+                                      map_id=self._default_map_id())
         self.db.add_player(game_id, user.id, user.display_name, avatar_url(user))
         g = self.db.get(game_id)
         await interaction.response.send_message(self._lobby_text(g), view=self._lobby_view(g),
@@ -84,7 +89,8 @@ class JumanjiController:
 
     async def launch(self, channel, home_id=None) -> int:
         """Запуск из консоли (-game run jumanji ...). Хоста нет: им станет первый, кто нажмёт «Присоединиться»."""
-        game_id = self.db.create_game(channel.guild.id, channel.id, 0, home_id)
+        game_id = self.db.create_game(channel.guild.id, channel.id, 0, home_id,
+                                      map_id=self._default_map_id())
         g = self.db.get(game_id)
         try:
             msg = await channel.send(self._lobby_text(g), view=self._lobby_view(g), allowed_mentions=NO_PINGS)
@@ -427,7 +433,7 @@ class JumanjiController:
             self._arm(rt)
         self._save(rt)
         await self._publish(rt, bump=bump)
-        if m.awaiting_minigame:
+        if m.awaiting_minigame and any(e.kind == "minigame" for e in events):
             self._spawn(self._minigame(rt))
 
     def _save(self, rt: Runtime):

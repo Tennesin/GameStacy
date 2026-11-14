@@ -142,7 +142,9 @@ class MiniGame:
         return discord.utils.escape_mentions(discord.utils.escape_markdown(raw))
 
     def mention(self, uid: int) -> str:
-        """Настоящий тег игрока (пингует)."""
+        """Настоящий тег игрока (пингует). У ботов и манекена тега нет: просто имя."""
+        if uid < 0:
+            return f"**{self.nm(uid)}**"
         return f"<@{uid}>"
 
     def parse_pick(self, text: str):

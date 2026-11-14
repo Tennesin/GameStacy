@@ -10,6 +10,7 @@ from core.clock import Clock
 from core.db import MAIN_MIGRATIONS, connect
 from core.errors import report_error
 from core.console import start_console
+from core.full_games import console_game
 
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     await report_error(interaction, getattr(error, "original", error))
@@ -37,6 +38,8 @@ class StacyBot(discord.Client):
         self.db = connect(DATA_DIR / "stacy.db", MAIN_MIGRATIONS)
         self.clock = Clock(TZ, self.db)
         self.console_commands = {}
+        self.full_games = {}
+        self.console_commands["-game"] = console_game
         self._clock_task = None
 
     async def setup_hook(self):
