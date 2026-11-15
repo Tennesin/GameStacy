@@ -740,10 +740,12 @@ JMAP_USAGE = ("Использование:\n"
               "  -jmap list                   список готовых карт\n"
               "  -jmap import ПУТЬ_К_JSON     проверить карту и добавить в список для игроков\n"
               "                               (путь в кавычках или с прямыми слэшами)\n"
-              "  -jmap delete ID_карты        удалить карту из списка\n"
+              "  -jmap delete ID_карты        удалить готовую карту из списка\n"
               "  -jmap edit ID_канала [--gameid ID_канала] [название]\n"
               "                               открыть редактор карты в канале или ветке\n"
               "  -jmap drafts                 список черновиков редактора\n"
+              "  -jmap draftdel НАЗВАНИЕ      удалить черновик (название в кавычках, если есть пробелы)\n"
+              "  -jmap draftdel --all         удалить все черновики, кроме открытых в редакторе\n"
               "  -jmap sessions               открытые редакторы\n"
               "  -jmap close ID_сессии        закрыть редактор")
 
@@ -779,6 +781,28 @@ def _console_jmap(ctrl: JumanjiController, editor: EditorController):
             for r in rows:
                 print(f"  {r['name']}  (изменён {str(r['updated_utc'])[:16]})", flush=True)
             print(f"Черновиков: {len(rows)}", flush=True)
+        elif sub == "draftdel" and len(args) >= 2:
+            busy = {s["map_name"].casefold() for s in ctrl.db.editors()}   # черновики, открытые в редакторе
+            if args[1] == "--all":
+                done = skipped = 0
+                for r in ctrl.db.list_drafts():
+                    if r["name"].casefold() in busy:
+                        skipped += 1
+                        continue
+                    ctrl.db.delete_draft(r["name"])
+                    done += 1
+                msg = f"✔ Удалено черновиков: {done}"
+                if skipped:
+                    msg += f"; пропущено (открыты в редакторе): {skipped}"
+                print(msg, flush=True)
+            else:
+                name = " ".join(args[1:]).strip('"')
+                if name.casefold() in busy:
+                    print("⚠ Этот черновик открыт в редакторе. Сначала закройте сессию: "
+                          "-jmap sessions, затем -jmap close ID_сессии.", flush=True)
+                else:
+                    print("✔ Удалён." if ctrl.db.delete_draft(name) else "⚠ Такого черновика нет.",
+                          flush=True)
         elif sub == "sessions":
             editor.console_sessions()
         elif sub == "close" and len(args) >= 2 and args[1].isdigit():
