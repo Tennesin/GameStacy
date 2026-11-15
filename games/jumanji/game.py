@@ -20,7 +20,7 @@ from core.scope import ignore, in_scope
 from .avatars import avatar_url, load_avatars
 from .logic import Match, Player, Track, effective_bots
 from .models import GameMap, MapFormatError
-from .render import BOT_COLOR_NAMES, make_tokens, render_board_async
+from .render import BOT_NAMES, make_tokens, render_board_async
 from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
                     MIN_PLAYERS, MINI_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
 from .storage import Storage
@@ -40,6 +40,10 @@ RULES_TEXT = ("**Правила.** Бросайте кубик по очеред
 
 def esc(text) -> str:
     return discord.utils.escape_markdown(discord.utils.escape_mentions(str(text)))
+
+def bot_name(pid: int) -> str:
+    """Имя бота по его ID: совпадает с цветом его фишки на картинке."""
+    return BOT_NAMES[BOT_IDS.index(pid)] if pid in BOT_IDS else "Бот"
 
 @dataclass
 class Runtime:
@@ -160,7 +164,7 @@ class JumanjiController:
         mp = self.db.get_map(g["map_id"]) if g["map_id"] else None
         host = f"<@{g['host_id']}>" if g["host_id"] else "станет первый, кто нажмёт «Присоединиться»"
         people = ", ".join(esc(r["name"]) for r in rows) or "пока никого"
-        bots = ", ".join(f"🤖 Бот {i + 1} ({BOT_COLOR_NAMES[i]})" for i in range(n_bots)) or "нет"
+        bots = ", ".join(f"🤖 {BOT_NAMES[i]}" for i in range(n_bots)) or "нет"
         ends = int(self.bot.clock.now().timestamp()) + LOBBY_SECONDS
         lines = [
             f"🎲 **Джуманджи** · партия #{g['game_id']}",
@@ -295,7 +299,7 @@ class JumanjiController:
 
             await interaction.response.defer()                     # дальше будет картинка: может занять время
             self._cancel_lobby_timer(game_id)
-            bots = [(BOT_IDS[i], f"Бот {i + 1}") for i in range(n_bots)]
+            bots = [(BOT_IDS[i], BOT_NAMES[i]) for i in range(n_bots)]
             players = ([Player(r["pid"], r["name"]) for r in humans]
                        + [Player(pid, name, True) for pid, name in bots])
             random.shuffle(players)                                # порядок ходов случайный
@@ -495,7 +499,7 @@ class JumanjiController:
         try:
             minis = getattr(self.bot, "mini_games", None)
             humans = {p.pid for p in m.players if p.on_map and not p.is_bot}
-            bots = {p.pid: rt.names.get(p.pid, "Бот") for p in m.players if p.on_map and p.is_bot}
+            bots = {p.pid: bot_name(p.pid) for p in m.players if p.on_map and p.is_bot}
             if minis is not None and minis.games and humans:
                 channel = self.bot.get_channel(rt.channel_id) or await self.bot.fetch_channel(rt.channel_id)
                 key = random.choice(list(minis.games))
@@ -572,10 +576,9 @@ class JumanjiController:
             log.exception("Не удалось отправить итоги партии #%s", rt.game_id)
 
     def _label(self, rt: Runtime, pid: int) -> str:
-        name = esc(rt.names.get(pid, pid))
         if pid in BOT_IDS:
-            return f"🤖 {name} ({BOT_COLOR_NAMES[BOT_IDS.index(pid)]})"
-        return name
+            return f"🤖 {bot_name(pid)}"
+        return esc(rt.names.get(pid, pid))
 
     def _describe(self, rt: Runtime, ev) -> Optional[str]:
         k, d = ev.kind, ev.data

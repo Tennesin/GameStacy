@@ -12,6 +12,10 @@ log = logging.getLogger("stacy.mini")
 
 DUMMY = -1                                   # «ID» манекена (настоящие ID Discord всегда положительные)
 TEAMS = [("🟥", "Красные"), ("🟦", "Синие")]
+BONUS_ROUNDS = ((12, 3), (7, 2))             # (после какого раунда, сколько очков за победу в раунде)
+
+def _points_word(n: int) -> str:
+    return "очко" if n == 1 else "очка" if 2 <= n <= 4 else "очков"
 
 class RollView(discord.ui.View):
     """Одна кнопка 🎲 на всю игру. Между раундами блокируется, на время раунда включается."""
@@ -83,7 +87,8 @@ class TugGame(MiniGame):
              "и ваш кубик (1-6) будет брошен. Кто не успел, получает 0. Когда нажали все, раунд завершается досрочно.\n"
              "Команда с большей суммой выигрывает раунд. Если очко должно достаться команде, "
              "которая сейчас проигрывает в счёте, оно не прибавляется ей, а снимается с лидера (верёвка тянется назад). "
-             "Побеждает команда, первой набравшая 3 очка. Ничья в раунде: верёвка не двигается.")
+             "Побеждает команда, первой набравшая 3 очка. Ничья в раунде: верёвка не двигается.\n"
+             "Чтобы игра не затягивалась: победа в раунде после 8-го даёт 2 очка, после 14-го ещё больше: 3 очка.")
 
     def pick_label(self, pick: int) -> str:
         return "участвует"
@@ -121,6 +126,9 @@ class TugGame(MiniGame):
 
     def _throw_text(self, rnd: int, done: int, total: int, closed: bool = False) -> str:
         head = "🎲 **БРОСОК!**" + (f" x{rnd}" if rnd > 1 else "")
+        pts = self._round_points(rnd)
+        if pts > 1:
+            head += f" · 🔥 победа в раунде даёт {pts} {_points_word(pts)}"
         if closed:
             return f"{head}\nПриём бросков закрыт: бросили {done} из {total}."
         return f"{head}\nНажмите кнопку 🎲 (до {self.THROW_SECONDS} с). Бросили: {done}/{total}"
@@ -137,16 +145,35 @@ class TugGame(MiniGame):
 
     # ---------- Логика ----------
 
-    def _apply(self, scores: list, winner: int) -> str:
-        """Меняет счёт по итогам раунда и возвращает пояснение."""
+    def _round_points(self, rnd: int) -> int:
+        """Сколько очков стоит победа в этом раунде."""
+        for after, pts in BONUS_ROUNDS:
+            if rnd > after:
+                return pts
+        return 1
+
+    def _apply(self, scores: list, winner: int, pts: int = 1) -> str:
+        """Меняет счёт по итогам раунда (по одному шагу pts раз) и возвращает пояснение."""
         loser = 1 - winner
         w_icon, w_name = TEAMS[winner]
         l_icon, l_name = TEAMS[loser]
-        if scores[loser] > scores[winner]:
-            scores[loser] -= 1
-            return f"{w_icon} {w_name} тянут назад: {l_icon} {l_name} теряют очко"
-        scores[winner] += 1
-        return f"{w_icon} {w_name} получают очко"
+        before = list(scores)
+        for _ in range(pts):
+            if scores[loser] > scores[winner]:
+                scores[loser] -= 1                    # верёвка тянется назад: очко снимается с лидера
+            else:
+                scores[winner] += 1
+                if scores[winner] >= self.GOAL:       # цель достигнута: дальше не начисляем
+                    break
+        lost = before[loser] - scores[loser]
+        gain = scores[winner] - before[winner]
+        parts = []
+        if lost:
+            parts.append(f"{l_icon} {l_name} теряют {lost} {_points_word(lost)}")
+        if gain:
+            parts.append(f"{w_icon} {w_name} получают {gain} {_points_word(gain)}")
+        text = " и ".join(parts)
+        return ("верёвка тянется назад: " + text) if lost else text
 
     async def play(self) -> list:
         players = list(self.picks)
@@ -204,7 +231,8 @@ class TugGame(MiniGame):
                 if totals[0] == totals[1]:
                     verdict = "ничья: верёвка не сдвинулась"
                 else:
-                    verdict = self._apply(scores, 0 if totals[0] > totals[1] else 1)
+                    verdict = self._apply(scores, 0 if totals[0] > totals[1] else 1,
+                                          self._round_points(rnd))
                 self.trace(f"Раунд {rnd}: суммы {TEAMS[0][1]} {totals[0]} — {totals[1]} {TEAMS[1][1]}; "
                            f"{verdict}; счёт {before} -> {scores}")
                 details = [f"**Раунд {rnd}:** {TEAMS[0][0]} {totals[0]} — {totals[1]} {TEAMS[1][0]} · {verdict}",

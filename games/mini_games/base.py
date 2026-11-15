@@ -6,6 +6,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 import discord
+from collections import Counter
 
 from config import MINI_PICK_SECONDS, MINI_ROLL_DELAY
 
@@ -182,12 +183,16 @@ class MiniGame:
         return "\n".join(lines)
 
     def fill_bots(self, ids=None):
-        """Боты делают случайный выбор (только те, кто ещё не выбрал)."""
+        """Боты выбирают так, чтобы не повторять чужие варианты."""
         options = [value for _label, value in self.pick_buttons()]
         for b in sorted(self.bots if ids is None else ids):
             if b in self.bots and b not in self.picks:
-                self.picks[b] = random.choice(options)
-                self.trace(f"Бот {self.label(b)} выбрал случайно: {self.pick_label(self.picks[b])}")
+                counts = Counter(self.picks.values())
+                least = min(counts.get(o, 0) for o in options)
+                pool = [o for o in options if counts.get(o, 0) == least]
+                self.picks[b] = random.choice(pool)
+                note = "" if least == 0 else " (свободных вариантов не осталось)"
+                self.trace(f"Бот {self.label(b)} выбрал {self.pick_label(self.picks[b])}{note}")
 
     # ---------- Приём выборов (кнопки) ----------
 
