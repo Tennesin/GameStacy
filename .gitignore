@@ -15,3 +15,8 @@ oracle-info.txt
 *.db-wal
 *.db-shm
 *.bak
+# Данные и временные папки
+data/
+jumanji_preview/
+maps_export/
+maps_import/
