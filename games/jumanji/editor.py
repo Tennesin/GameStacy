@@ -164,7 +164,7 @@ class EditorView(discord.ui.View):
             add("Очистить ячейку", "clear", 2, S.danger)
             add("Назад", "back", 2)
         else:
-            add("Меню", "menu", 0, S.secondary, "☰")
+            add("Меню", "menu", 0, S.secondary, "📋")
             add("Поставить", "place", 0, S.success)
             add("Выбрать", "select", 0, S.primary)
 
