@@ -1,7 +1,7 @@
 """Кнопки крестиков-ноликов. Постоянные: timeout=None и фиксированные custom_id."""
-
 import discord
 
+from core.errors import is_expired
 from .logic import EMPTY, MARKS, find_win
 
 class LobbyView(discord.ui.View):
@@ -18,6 +18,8 @@ class LobbyView(discord.ui.View):
             self.stop()
 
     async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
         await self.ctrl.fail(interaction, self.game_id, error)
         self.stop()
 
@@ -64,5 +66,7 @@ class BoardView(discord.ui.View):
             self.stop()
 
     async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
         await self.ctrl.fail(interaction, self.game_id, error)
         self.stop()

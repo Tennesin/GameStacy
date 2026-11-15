@@ -9,6 +9,10 @@ from config import DEV_ID
 
 log = logging.getLogger("stacy.errors")
 
+def is_expired(error: BaseException) -> bool:
+    """Нажатие устарело: Discord ждёт ответ 3 секунды (код 10062). Это не поломка игры."""
+    return isinstance(error, discord.NotFound) and getattr(error, "code", None) == 10062
+
 TECH_ERROR_TEXT = ("ПРОИЗОШЛА ТЕХНИЧЕСКАЯ ОШИБКА! ПРОСИМ ИЗВИНЕНИЙ "
                    "И ДОЛОЖИТЬ ПРОИЗОШЕДШЕЕ РАЗРАБОТЧИКУ <@{dev}>")
 
@@ -16,6 +20,9 @@ async def report_error(interaction: discord.Interaction, error: BaseException,
                        closing_text: Optional[str] = None):
     """closing_text: если задан, сообщение с кнопками заменяется этим текстом (сессия закрывается),
     а извинение уходит отдельным сообщением, чтобы упоминание разработчика сработало."""
+    if is_expired(error):
+        log.warning("Нажатие устарело (бот не успел ответить за 3 с): %s", error)
+        return
     log.error("Необработанная ошибка", exc_info=error)      # исходный Traceback в консоль
     text = TECH_ERROR_TEXT.format(dev=DEV_ID)
     try:

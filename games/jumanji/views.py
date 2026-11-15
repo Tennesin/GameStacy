@@ -1,6 +1,7 @@
 """Кнопки Джуманджи. Постоянные: timeout=None и фиксированные custom_id вида jmj:ID_партии:действие."""
 import discord
 
+from core.errors import is_expired
 from .rules import MAX_BOTS
 
 class LobbyView(discord.ui.View):
@@ -59,6 +60,8 @@ class LobbyView(discord.ui.View):
         await self.ctrl.lobby_play(i, self.game_id)
 
     async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
         await self.ctrl.fail(interaction, self.game_id, error)
         self.stop()
 
@@ -94,5 +97,7 @@ class PlayView(discord.ui.View):
         await self.ctrl.play_leave(i, self.game_id)
 
     async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
         await self.ctrl.fail(interaction, self.game_id, error)
         self.stop()
