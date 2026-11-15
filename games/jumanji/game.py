@@ -26,7 +26,7 @@ from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG
 from .storage import Storage
 from .editor import EditorController
 from .validator import validate_map
-from .views import LobbyView, PlayView
+from .views import ConfirmLeaveView, LobbyView, PlayView
 
 log = logging.getLogger("stacy.jumanji")
 
@@ -250,27 +250,53 @@ class JumanjiController:
             await self._lobby_refresh(interaction, game_id)
 
     async def lobby_leave(self, interaction: discord.Interaction, game_id: int):
+        """Нажата «Выйти» в лобби: сначала спрашиваем подтверждение (скрытым сообщением)."""
+        g = self._lobby_row(game_id)
+        if g is None:
+            await interaction.response.send_message("Этот набор уже закрыт.", ephemeral=True)
+            return
+        if not await self._guard(interaction, g):
+            return
+        if not any(r["pid"] == interaction.user.id for r in self.db.players(game_id)):
+            await interaction.response.send_message("Вас нет в списке игроков.", ephemeral=True)
+            return
+        view = ConfirmLeaveView(self, game_id, lobby=True)
+        await interaction.response.send_message(
+            "Вы точно хотите выйти из набора на партию?", view=view, ephemeral=True)
+        view.origin = interaction
+
+    async def lobby_leave_confirm(self, interaction: discord.Interaction, game_id: int):
+        """Нажата «Да» в окне подтверждения: реальный выход из лобби.
+        Interaction здесь относится к скрытому окну, поэтому сообщение лобби правим через канал."""
         async with self.locks[game_id]:
             g = self._lobby_row(game_id)
             if g is None:
-                await interaction.response.send_message("Этот набор уже закрыт.", ephemeral=True)
-                return
-            if not await self._guard(interaction, g):
+                await interaction.response.edit_message(content="Этот набор уже закрыт.", view=None)
                 return
             uid = interaction.user.id
             if not self.db.remove_player(game_id, uid):
-                await interaction.response.send_message("Вас нет в списке игроков.", ephemeral=True)
+                await interaction.response.edit_message(content="Вас уже нет в списке игроков.", view=None)
                 return
+            await interaction.response.edit_message(content="Вы вышли из набора.", view=None)
+
             rows = self.db.players(game_id)
-            if not rows:
-                self.db.abort(game_id, "closed")
-                self._cancel_lobby_timer(game_id)
-                await interaction.response.edit_message(
-                    content="Набор закрыт: все игроки вышли. Для новой партии используйте /jumanji.", view=None)
-                return
-            if g["host_id"] == uid:
-                self.db.set_host(game_id, rows[0]["pid"])
-            await self._lobby_refresh(interaction, game_id)
+            lobby_msg = self.bot.get_partial_messageable(g["channel_id"]).get_partial_message(g["message_id"])
+            try:
+                if not rows:
+                    self.db.abort(game_id, "closed")
+                    self._cancel_lobby_timer(game_id)
+                    await lobby_msg.edit(
+                        content="Набор закрыт: все игроки вышли. Для новой партии используйте /jumanji.",
+                        view=None)
+                else:
+                    if g["host_id"] == uid:
+                        self.db.set_host(game_id, rows[0]["pid"])
+                    fresh = self.db.get(game_id)
+                    await lobby_msg.edit(content=self._lobby_text(fresh), view=self._lobby_view(fresh),
+                                         allowed_mentions=NO_PINGS)
+                    self._schedule_expiry(game_id, LOBBY_SECONDS)
+            except discord.HTTPException:
+                log.exception("Не удалось обновить лобби #%s после выхода игрока", game_id)
 
     async def lobby_play(self, interaction: discord.Interaction, game_id: int):
         async with self.locks[game_id]:
@@ -410,16 +436,34 @@ class JumanjiController:
             await self._after(rt, events, rearm=False)             # таймер ходящего не сбрасываем
 
     async def play_leave(self, interaction: discord.Interaction, game_id: int):
+        """Нажата «Выйти» под табло: сначала спрашиваем подтверждение (скрытым сообщением)."""
+        got = await self._playing(interaction, game_id)
+        if got is None:
+            return
+        rt = got[0]
+        p = rt.match.get(interaction.user.id)
+        if p is None or not p.on_map:
+            await interaction.response.send_message("Вы не участвуете в игре.", ephemeral=True)
+            return
+        view = ConfirmLeaveView(self, game_id, lobby=False)
+        await interaction.response.send_message(
+            "Вы точно хотите выйти из партии? Вернуться в неё потом не получится.",
+            view=view, ephemeral=True)
+        view.origin = interaction
+
+    async def play_leave_confirm(self, interaction: discord.Interaction, game_id: int):
+        """Нажата «Да» в окне подтверждения: реальный выход из партии.
+        Табло обновляется через канал (_after), а скрытое окно закрываем ответом на это нажатие."""
         async with self.locks[game_id]:
-            got = await self._playing(interaction, game_id)
-            if got is None:
+            rt, g = self.rt.get(game_id), self.db.get(game_id)
+            if rt is None or g is None or g["status"] != "playing":
+                await interaction.response.edit_message(content="Партия уже завершена.", view=None)
                 return
-            rt = got[0]
             p = rt.match.get(interaction.user.id)
             if p is None or not p.on_map:
-                await interaction.response.send_message("Вы не участвуете в игре.", ephemeral=True)
+                await interaction.response.edit_message(content="Вы уже не участвуете в игре.", view=None)
                 return
-            await interaction.response.defer()
+            await interaction.response.edit_message(content="🚪 Вы вышли из партии.", view=None)
             events = rt.match.leave(p.pid)
             await self._after(rt, events, rearm=any(e.kind == "turn" for e in events))
 

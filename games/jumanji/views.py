@@ -1,7 +1,8 @@
 """Кнопки Джуманджи. Постоянные: timeout=None и фиксированные custom_id вида jmj:ID_партии:действие."""
+from contextlib import suppress
 import discord
 
-from core.errors import is_expired
+from core.errors import is_expired, report_error
 from .rules import MAX_BOTS
 
 class LobbyView(discord.ui.View):
@@ -100,4 +101,37 @@ class PlayView(discord.ui.View):
         if is_expired(error):
             return
         await self.ctrl.fail(interaction, self.game_id, error)
+        self.stop()
+
+class ConfirmLeaveView(discord.ui.View):
+    """Скрытое окно «Выйти? Да / Нет»."""
+
+    def __init__(self, ctrl, game_id: int, lobby: bool):
+        super().__init__(timeout=60)
+        self.ctrl, self.game_id, self.lobby = ctrl, game_id, lobby
+        self.origin = None          # взаимодействие, которое открыло это окно (для правки по тайм-ауту)
+
+    @discord.ui.button(label="Да", style=discord.ButtonStyle.danger)
+    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        if self.lobby:
+            await self.ctrl.lobby_leave_confirm(interaction, self.game_id)
+        else:
+            await self.ctrl.play_leave_confirm(interaction, self.game_id)
+
+    @discord.ui.button(label="Нет", style=discord.ButtonStyle.secondary)
+    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Хорошо, вы остаётесь в игре.", view=None)
+
+    async def on_timeout(self):
+        if self.origin is not None:
+            with suppress(discord.HTTPException):
+                await self.origin.edit_original_response(
+                    content="Время вышло: вы остались в игре.", view=None)
+
+    async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
+        await report_error(interaction, error)
         self.stop()

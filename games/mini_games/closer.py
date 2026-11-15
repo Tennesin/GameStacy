@@ -1,4 +1,4 @@
-"""Мини-игра «Будь ближе!»."""
+"""Мини-игра «Будь ближе!»: числа 1-12 замкнуты в кольцо (после 12 снова идёт 1)."""
 from .base import MiniGame
 
 class CloserGame(MiniGame):
@@ -8,9 +8,16 @@ class CloserGame(MiniGame):
     GOAL = 5
     pick_row_width = 4
     rules = ("Выберите кнопкой любое число от **1 до 12**.\n"
-             "Стейси бросает кубик (1-12). Тот, чьё число совпало или оказалось ближе всех к выпавшему, "
-             "получает 1 балл; если таких несколько, балл получают все. "
+             "Числа стоят по кругу: после 12 снова идёт 1, так что 12 и 1 — соседи.\n"
+             "Стейси бросает кубик (1-12). Тот, чьё число совпало или оказалось ближе всех к выпавшему "
+             "(считая по кругу), получает 1 балл; если таких несколько, балл получают все. "
              "Побеждает тот, кто первым наберёт 5 баллов.")
+
+    def ring_dist(self, a: int, b: int) -> int:
+        """Расстояние между числами по кольцу: 12 и 1 — соседи (расстояние 1)."""
+        size = self.pick_max - self.pick_min + 1
+        d = abs(a - b)
+        return min(d, size - d)
 
     def _board(self, scores: dict, last, near: list) -> str:
         lines = ["🎯 **Будь ближе!**" + (f" · выпало: **{last}**" if last else "")]
@@ -27,16 +34,16 @@ class CloserGame(MiniGame):
         while True:
             rnd += 1
             n = await self.roll(12)
-            dist = {u: abs(p - n) for u, p in self.picks.items()}
+            dist = {u: self.ring_dist(p, n) for u, p in self.picks.items()}
             best = min(dist.values())
             near = [u for u, d in dist.items() if d == best]
             for u in near:
                 scores[u] += 1
-            self.trace(f"Раунд {rnd}: выпало {n}; ближайшая дистанция {best}; "
+            self.trace(f"Раунд {rnd}: выпало {n}; ближайшая дистанция по кольцу {best}; "
                        f"очко получают: {', '.join(self.label(u) for u in near)}")
             for u in scores:
                 self.trace(f"  {self.label(u)}: загадал {self.picks[u]}, "
-                           f"расстояние {dist[u]}, баллов {scores[u]}/{self.GOAL}")
+                           f"расстояние по кольцу {dist[u]}, баллов {scores[u]}/{self.GOAL}")
             board = await self.show(board, self._board(scores, n, near))
             done = [u for u in near if scores[u] >= self.GOAL]
             if done:
