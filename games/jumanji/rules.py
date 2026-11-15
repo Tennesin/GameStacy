@@ -13,9 +13,11 @@ RESET_TIMEOUTS_ON_ROLL = True          # True — считаются тайма�
 MAX_EXTRA_ROLLS = 3                    # сколько допбросков подряд даёт «Зарядить» за один ход
 
 # ---------- Карта ----------
-GRID_MAX_W = 10                        # столбцы A..J
-GRID_MAX_H = 8                         # строки 1..8
 MAP_NAME_MAX = 40
+GRID_MAX_W = 17                        # столбцы
+GRID_MAX_H = 17                        # строки
+GRID_DEFAULT_W = 10                    # размер новой карты (меняется в редакторе: Меню -> Размер сетки)
+GRID_DEFAULT_H = 8
 
 EFFECTS = ("jump", "back", "skip", "charge", "mini", "reset")
 TARGET_EFFECTS = ("jump", "back")      # эффекты, которым нужна клетка-цель

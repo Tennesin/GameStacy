@@ -21,6 +21,7 @@ SS = 2
 CELL = 112                 # сторона клетки сетки
 RADIUS = 44                # радиус круга-ячейки
 PAD = 10                   # поля вокруг карты
+MAX_SIDE = 1600            # итоговая картинка не больше этого по длинной стороне (сетка 16x16 иначе слишком тяжёлая)
 
 # ---------- Цвета ----------
 BG = (43, 45, 49, 255)
@@ -172,6 +173,116 @@ def _arrow(d, a, b, color, width, head, start_off, end_off, dashed=False):
     d.polygon([tip, (base[0] + nx * head * 0.6, base[1] + ny * head * 0.6),
                (base[0] - nx * head * 0.6, base[1] - ny * head * 0.6)], fill=color)
 
+ARC_FACTORS = (0.0, 0.18, -0.18, 0.36, -0.36, 0.55, -0.55, 0.8, -0.8, 1.1, -1.1, 1.5, -1.5)
+
+def _bezier(a, c, b, steps):
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1 - t
+        pts.append((u * u * a[0] + 2 * u * t * c[0] + t * t * b[0],
+                    u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]))
+    return pts
+
+def _near(pts, obstacles, margin):
+    """Только те центры, что лежат в рамке вокруг кривой: остальные заведомо дальше margin."""
+    x0, x1 = min(p[0] for p in pts) - margin, max(p[0] for p in pts) + margin
+    y0, y1 = min(p[1] for p in pts) - margin, max(p[1] for p in pts) + margin
+    return [o for o in obstacles if x0 <= o[0] <= x1 and y0 <= o[1] <= y1]
+
+def _is_clear(pts, obstacles, safe) -> bool:
+    safe2 = safe * safe
+    for ox, oy in _near(pts, obstacles, safe):
+        for px, py in pts:
+            if (px - ox) ** 2 + (py - oy) ** 2 < safe2:
+                return False
+    return True
+
+def _min_dist(pts, obstacles) -> float:
+    best = 1e18
+    for ox, oy in obstacles:
+        for px, py in pts:
+            best = min(best, (px - ox) ** 2 + (py - oy) ** 2)
+    return best
+
+def _route(a, b, obstacles, box, safe):
+    """Путь от a к b, не задевающий круги ячеек (obstacles — их центры; safe — минимальный зазор до центра).
+    Сначала пробует прямую, затем дуги всё большего изгиба с обеих сторон. Дуга обязана лежать внутри box.
+    Если чистого пути нет, берётся дуга с наибольшим зазором."""
+    L = math.hypot(b[0] - a[0], b[1] - a[1])
+    if L < 1:
+        return [a, b]
+    nx, ny = -(b[1] - a[1]) / L, (b[0] - a[0]) / L
+    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    steps = max(16, int(L / (24 * SS)))
+    tried = []
+    for f in ARC_FACTORS:
+        pts = _bezier(a, (mx + nx * L * f, my + ny * L * f), b, steps)
+        if not all(box[0] <= x <= box[2] and box[1] <= y <= box[3] for x, y in pts):
+            continue
+        if _is_clear(pts, obstacles, safe):
+            return pts
+        tried.append(pts)
+    if not tried:
+        return [a, b]
+    return max(tried, key=lambda p: _min_dist(p, _near(p, obstacles, safe * 3)) if _near(p, obstacles, safe * 3) else 1e18)
+
+def _trim(pts, a, b, s_off, e_off):
+    """Обрезает ломаную у кругов ячеек a и b (точно, с интерполяцией)."""
+    def cut(inside, outside, c, off):
+        d_in, d_out = math.dist(inside, c), math.dist(outside, c)
+        t = 0.0 if d_out == d_in else max(0.0, min(1.0, (off - d_in) / (d_out - d_in)))
+        return (inside[0] + (outside[0] - inside[0]) * t, inside[1] + (outside[1] - inside[1]) * t)
+
+    i = 0
+    while i < len(pts) and math.dist(pts[i], a) < s_off:
+        i += 1
+    j = len(pts) - 1
+    while j >= 0 and math.dist(pts[j], b) < e_off:
+        j -= 1
+    if i >= j or i == 0 or j == len(pts) - 1:
+        return pts[i:j + 1] if i < j else []
+    return [cut(pts[i - 1], pts[i], a, s_off)] + pts[i:j + 1] + [cut(pts[j + 1], pts[j], b, e_off)]
+
+def _dashed_poly(d, pts, color, width, dash, gap):
+    on, left = True, dash
+    for p, q in zip(pts, pts[1:]):
+        seg = math.hypot(q[0] - p[0], q[1] - p[1])
+        if seg == 0:
+            continue
+        ux, uy = (q[0] - p[0]) / seg, (q[1] - p[1]) / seg
+        pos = 0.0
+        while pos < seg:
+            step = min(left, seg - pos)
+            if on:
+                d.line([(p[0] + ux * pos, p[1] + uy * pos),
+                        (p[0] + ux * (pos + step), p[1] + uy * (pos + step))], fill=color, width=width)
+            pos += step
+            left -= step
+            if left <= 1e-9:
+                on = not on
+                left = dash if on else gap
+
+def _poly_arrow(d, pts, color, width, head):
+    """Пунктирная стрелка вдоль ломаной; наконечник направлен по касательной к концу."""
+    if len(pts) < 2:
+        return
+    tip, back = pts[-1], pts[0]
+    for p in reversed(pts[:-1]):
+        if math.dist(p, tip) >= head * 0.8:
+            back = p
+            break
+    ux, uy = tip[0] - back[0], tip[1] - back[1]
+    ln = math.hypot(ux, uy)
+    if ln == 0:
+        return
+    ux, uy = ux / ln, uy / ln
+    base = (tip[0] - ux * head, tip[1] - uy * head)
+    _dashed_poly(d, pts, color, width, 10 * SS, 7 * SS)
+    nx, ny = -uy, ux
+    d.polygon([tip, (base[0] + nx * head * 0.6, base[1] + ny * head * 0.6),
+               (base[0] - nx * head * 0.6, base[1] - ny * head * 0.6)], fill=color)
+
 def _icon(d, kind: str, cx: float, cy: float, fg):
     k = SS
 
@@ -213,49 +324,57 @@ def _bounds(m: GameMap, show_grid: bool) -> tuple:
     return min(xs), min(ys), max(xs), max(ys)
 
 def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
-    """PNG-табло. tokens — фишки (make_tokens); selected — подсветить ячейку (для редактора);
-    show_grid — показать пустые места сетки (для редактора). Карта может быть недоделанной."""
+    """PNG-табло. tokens — фишки (make_tokens)."""
     path, _problem = trace_path(m)
     index = {cid: i for i, cid in enumerate(path)}
     x0, y0, x1, y1 = _bounds(m, show_grid)
-    W = ((x1 - x0 + 1) * CELL + 2 * PAD) * SS
-    H = ((y1 - y0 + 1) * CELL + 2 * PAD) * SS
+    shift = 0.0 if show_grid else max((max(abs(c.dx), abs(c.dy)) for c in m.cells.values()), default=0.0)
+    pad = PAD + math.ceil(shift * CELL)                       # поля растут, чтобы сдвинутые ячейки не обрезались
+    W = ((x1 - x0 + 1) * CELL + 2 * pad) * SS
+    H = ((y1 - y0 + 1) * CELL + 2 * pad) * SS
     img = Image.new("RGBA", (W, H), BG)
     d = ImageDraw.Draw(img, "RGBA")
+    R = RADIUS * SS
 
     def center(cid: str):
         x, y = parse_cell_id(cid)
-        return (((x - x0) * CELL + CELL / 2 + PAD) * SS, ((y - y0) * CELL + CELL / 2 + PAD) * SS)
+        c = m.cells.get(cid)
+        ox, oy = (0.0, 0.0) if (show_grid or c is None) else (c.dx, c.dy)
+        return (((x - x0 + 0.5 + ox) * CELL + pad) * SS, ((y - y0 + 0.5 + oy) * CELL + pad) * SS)
 
     def drawable(cid) -> bool:
         return bool(cid) and cid in m.cells and parse_cell_id(cid) is not None
 
-    R = RADIUS * SS
+    centers = {cid: center(cid) for cid in m.cells if drawable(cid)}
 
     # подписи координат и пустые места сетки (только в редакторе)
     if show_grid:
         label_font, _ = _font(13 * SS)
         for gx in range(x0, x1 + 1):
             for gy in range(y0, y1 + 1):
-                cx = ((gx - x0) * CELL + CELL / 2 + PAD) * SS
-                cy = ((gy - y0) * CELL + CELL / 2 + PAD) * SS
+                cx = ((gx - x0) * CELL + CELL / 2 + pad) * SS
+                cy = ((gy - y0) * CELL + CELL / 2 + pad) * SS
                 cid = f"{chr(65 + gx)}{gy + 1}"
                 if cid not in m.cells:
                     d.ellipse((cx - 6 * SS, cy - 6 * SS, cx + 6 * SS, cy + 6 * SS), fill=(80, 84, 92, 255))
                 d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
                        font=label_font, fill=(125, 130, 140, 255))
 
-    # пунктир прыжков и откатов
+    # пунктир прыжков и откатов: прямая или дуга, обходящая все остальные ячейки
+    box = (3 * SS, 3 * SS, W - 3 * SS, H - 3 * SS)
+    safe = R + 6 * SS
     for cid, c in m.cells.items():
         if c.effect in ("jump", "back") and drawable(cid) and drawable(c.target):
-            col = EFFECT_COLORS[c.effect] + (170,)
-            _arrow(d, center(cid), center(c.target), col, 4 * SS, 12 * SS, R + 3 * SS, R + 3 * SS, dashed=True)
+            obstacles = [p for k, p in centers.items() if k != cid and k != c.target]
+            pts = _route(centers[cid], centers[c.target], obstacles, box, safe)
+            pts = _trim(pts, centers[cid], centers[c.target], R + 3 * SS, R + 3 * SS)
+            _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (170,), 4 * SS, 12 * SS)
 
     # стрелки маршрута
     for cid, c in m.cells.items():
         if cid == m.finish or cid == c.next or not drawable(cid) or not drawable(c.next):
             continue
-        _arrow(d, center(cid), center(c.next), LINK_ON if cid in index else LINK_OFF,
+        _arrow(d, centers[cid], centers[c.next], LINK_ON if cid in index else LINK_OFF,
                5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS)
 
     # ячейки
@@ -263,7 +382,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     for cid, c in m.cells.items():
         if not drawable(cid):
             continue
-        cx, cy = center(cid)
+        cx, cy = centers[cid]
         on = cid in index
         a = 255 if on else ORPHAN_ALPHA
         if cid == m.finish:
@@ -293,7 +412,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         if 0 <= t.pos < len(path):
             groups.setdefault(t.pos, []).append(t)
     for pos, group in groups.items():
-        cx, cy = center(path[pos])
+        cx, cy = centers[path[pos]]
         shared = len(group) > 1
         items = sorted(zip(group, _slots(len(group))), key=lambda it: it[0].current)   # ходящий — сверху
         for tok, (dx, dy, dia) in items:
@@ -305,7 +424,12 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
                                                     fill=(255, 214, 64, 70))
             img.alpha_composite(tile, (int(px - tile.width / 2), int(py - tile.height / 2)))
 
-    out = img.resize((W // SS, H // SS), RESAMPLE).convert("RGB")
+    tw, th = W // SS, H // SS
+    big = max(tw, th)
+    if big > MAX_SIDE:                                        # большая сетка: сразу уменьшаем до разумного размера
+        k = MAX_SIDE / big
+        tw, th = max(1, int(tw * k)), max(1, int(th * k))
+    out = img.resize((tw, th), RESAMPLE).convert("RGB")
     buf = io.BytesIO()
     out.save(buf, "PNG")
     return buf.getvalue()

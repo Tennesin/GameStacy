@@ -35,6 +35,8 @@ class Cell:
     next: Optional[str] = None       # следующая ячейка маршрута (у финиша не нужна)
     effect: Optional[str] = None     # jump / back / skip / charge / mini / reset
     target: Optional[str] = None     # цель для jump / back
+    dx: float = 0.0                  # визуальный сдвиг внутри клетки сетки (доли клетки), только для картинки
+    dy: float = 0.0
 
 @dataclass
 class GameMap:
@@ -57,12 +59,17 @@ class GameMap:
             for key in ("next", "effect", "target"):
                 if getattr(c, key):
                     item[key] = getattr(c, key)
+            if c.dx or c.dy:
+                item["dx"], item["dy"] = round(c.dx, 3), round(c.dy, 3)
             cells.append(item)
         return {"format": FORMAT_VERSION, "name": self.name, "width": self.width,
                 "height": self.height, "start": self.start, "finish": self.finish, "cells": cells}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=1)
+
+    def copy(self) -> "GameMap":
+        return GameMap.from_dict(self.to_dict())
 
     @classmethod
     def from_dict(cls, data) -> "GameMap":
@@ -88,8 +95,13 @@ class GameMap:
             if cid in m.cells:
                 raise MapFormatError(f"Ячейка {cid} записана дважды.")
             effect = str(item.get("effect") or "").strip().lower() or None
+            try:
+                dx = max(-0.5, min(0.5, float(item.get("dx") or 0)))
+                dy = max(-0.5, min(0.5, float(item.get("dy") or 0)))
+            except (TypeError, ValueError):
+                raise MapFormatError(f"Некорректный сдвиг у ячейки {cid}.")
             m.cells[cid] = Cell(cid, norm_id(item.get("next")) or None, effect,
-                                norm_id(item.get("target")) or None)
+                                norm_id(item.get("target")) or None, dx, dy)
         return m
 
     @classmethod

@@ -104,6 +104,21 @@ def test_editor_helpers():
     assert m.start is None
     print("помощники редактора: OK")
 
+def test_jitter():
+    from .jitter import MAX_SHIFT, jittered
+    good = make_line(30, {3: ("jump", 9), 5: "skip", 12: ("back", 7), 15: "reset"})
+    before = good.to_dict()
+    for seed in range(100):
+        j = jittered(good, seed)
+        assert validate_map(j, runs=50).ok
+        assert set(j.cells) == set(good.cells)
+        assert any(c.dx or c.dy for c in j.cells.values())
+        for c in j.cells.values():
+            assert abs(c.dx) <= MAX_SHIFT + 1e-9 and abs(c.dy) <= MAX_SHIFT + 1e-9
+        assert GameMap.from_json(j.to_json()).to_dict() == j.to_dict()
+    assert good.to_dict() == before                      # исходная карта не меняется
+    print("шум карты: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -134,6 +149,7 @@ def main():
         play_random(track, seed)
     test_bonuses()
     test_editor_helpers()
+    test_jitter()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

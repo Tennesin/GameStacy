@@ -69,11 +69,14 @@ MIGRATIONS = [
         updated_utc     TEXT NOT NULL
     );
     """,
+    """
+    ALTER TABLE editor_sessions ADD COLUMN jitter_seed INTEGER;   -- зерно предпросмотра экспорта; NULL — предпросмотра нет
+    """,
 ]
 
 _GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "host_id", "status", "solo", "bots", "map_id",
                 "map_name", "map_json", "state_json", "turn_deadline_utc", "result"}
-_EDITOR_FIELDS = {"message_id", "map_name", "selected", "tail", "panel"}
+_EDITOR_FIELDS = {"message_id", "map_name", "selected", "tail", "panel", "jitter_seed"}
 
 class Storage:
     def __init__(self, clock, path: Optional[Path] = None):

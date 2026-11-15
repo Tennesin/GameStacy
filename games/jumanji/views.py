@@ -65,11 +65,14 @@ class LobbyView(discord.ui.View):
 class PlayView(discord.ui.View):
     """Под табло идущей партии: кубик, присоединиться, выйти."""
 
-    def __init__(self, ctrl, game_id: int, locked: bool = False):
+    def __init__(self, ctrl, game_id: int, locked: bool = False, turn_name: str = ""):
         super().__init__(timeout=None)
         self.ctrl, self.game_id = ctrl, game_id
 
-        roll = discord.ui.Button(label="Бросить кубик", emoji="🎲", style=discord.ButtonStyle.success,
+        # Кнопка живая только в ход человека и подписана его именем: остальные сразу видят, чей сейчас ход
+        label = f"Бросок: {turn_name}"[:80] if (turn_name and not locked) else "Бросить кубик"
+        roll = discord.ui.Button(label=label, emoji="🎲",
+                                 style=discord.ButtonStyle.secondary if locked else discord.ButtonStyle.success,
                                  custom_id=f"jmj:{game_id}:roll", row=0, disabled=locked)
         roll.callback = self._on_roll
         join = discord.ui.Button(label="Присоединиться", style=discord.ButtonStyle.primary,

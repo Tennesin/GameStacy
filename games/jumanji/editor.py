@@ -13,7 +13,9 @@ from core.errors import report_error
 from core.scope import ignore, in_scope
 from .models import Cell, GameMap, MapFormatError, cell_id, parse_cell_id, trace_path
 from .render import render_board_async
-from .rules import EFFECT_ICONS, EFFECT_TITLES, GRID_MAX_H, GRID_MAX_W, MAP_NAME_MAX, TARGET_EFFECTS
+from .jitter import jittered, new_seed
+from .rules import (EFFECT_ICONS, EFFECT_TITLES, GRID_DEFAULT_H, GRID_DEFAULT_W, GRID_MAX_H, GRID_MAX_W,
+                    MAP_NAME_MAX, TARGET_EFFECTS)
 from .validator import validate_map
 
 log = logging.getLogger("stacy.jumanji.editor")
@@ -148,8 +150,13 @@ class EditorView(discord.ui.View):
             add("Проверить", "check", 0)
             add("Экспортировать", "export", 0, S.primary)
             add("Переименовать", "rename", 0)
+            add("Размер сетки", "size", 1)
             add("Назад", "back", 1)
             add("Закрыть редактор", "close", 1, S.danger)
+        elif panel == "preview":
+            add("Подтвердить", "jit_ok", 0, S.success)
+            add("Попробовать снова", "jit_again", 0, S.primary)
+            add("Назад", "jit_back", 0)
         elif panel == "cell":
             add("Прыжок", "e_jump", 0, S.success, EFFECT_ICONS["jump"])
             add("Откат", "e_back", 0, S.danger, EFFECT_ICONS["back"])
@@ -195,6 +202,8 @@ class EditorController:
         panel = s["panel"]
         if panel == "cell" and not s["selected"]:
             panel = "main"
+        if panel == "preview" and s["jitter_seed"] is None:
+            panel = "main"
         return EditorView(self, s["session_id"], panel)
 
     def _prepare_map(self, name):
@@ -214,6 +223,8 @@ class EditorController:
                 for r in maps:
                     if r["name"].casefold() == name.casefold():
                         m = GameMap.from_json(self.db.get_map(r["map_id"])["json"])
+                        for c in m.cells.values():
+                            c.dx = c.dy = 0.0
                         m.name = r["name"]
                         self.db.save_draft(m.name, m.to_json())
                         return m
@@ -225,7 +236,7 @@ class EditorController:
             while name.casefold() in taken:
                 name = f"{NEW_MAP_NAME} {i}"
                 i += 1
-        m = GameMap(name=name, width=GRID_MAX_W, height=GRID_MAX_H)
+        m = GameMap(name=name, width=GRID_DEFAULT_W, height=GRID_DEFAULT_H)
         self.db.save_draft(m.name, m.to_json())
         return m
 
@@ -296,7 +307,13 @@ class EditorController:
                          "🟡 мини-игра · ⚫ сброс на старт")
         elif panel == "menu":
             lines.append("Сохранить — файл-копия карты. Проверить — проверка без экспорта. "
-                         "Экспортировать — проверка и добавление в список карт для игроков.")
+                         "Экспортировать — проверка, затем предпросмотр «разбавленной» карты и подтверждение. "
+                         f"Размер сетки — до {GRID_MAX_W}×{GRID_MAX_H}.")
+        elif panel == "preview":
+            lines.append("👁 **Предпросмотр экспорта.** Так карта будет выглядеть у игроков: ячейки слегка "
+                         "разнесены по сторонам, а ячейки, маршрут и правила не меняются. "
+                         "**Подтвердить** — экспортировать именно этот вариант. "
+                         "**Попробовать снова** — другой случайный вариант. **Назад** — выйти без экспорта.")
         else:
             lines.append("Поставить — добавить ячейки по порядку маршрута (A1 B1 C1 или A1-E1): "
                          "каждая новая идёт после предыдущей. Выбрать — открыть ячейку для настройки.")
@@ -305,10 +322,14 @@ class EditorController:
         return "\n".join(lines)[:1990]
 
     async def _redraw(self, interaction: discord.Interaction, s, m: GameMap, note: str = ""):
-        """Картинка + текст + кнопки. Ответ на interaction уже должен быть дан (defer)."""
+        """Картинка + текст + кнопки. Ответ на interaction уже должен быть дан (defer).
+        В панели предпросмотра рисуется «разбавленная» копия карты, в остальных — ровная сетка."""
         kw = {}
         try:
-            png = await render_board_async(m, selected=s["selected"], show_grid=True)
+            if s["panel"] == "preview" and s["jitter_seed"] is not None:
+                png = await render_board_async(jittered(m, s["jitter_seed"]))
+            else:
+                png = await render_board_async(m, selected=s["selected"], show_grid=True)
             kw["attachments"] = [self._file(png)]
         except Exception:
             log.exception("Не удалось нарисовать карту редактора #%s", s["session_id"])
@@ -405,17 +426,54 @@ class EditorController:
                     f"💾 Черновик «{esc(m.name)}» сохранён (он и так сохраняется после каждого действия). "
                     "Копия во вложении.", file=file, ephemeral=True)
 
-            elif act in ("check", "export"):
+            elif act == "check":
                 await interaction.response.defer(ephemeral=True, thinking=True)
                 rep = await asyncio.to_thread(validate_map, m)
-                text = rep.text()
-                if act == "export":
-                    if rep.ok:
-                        map_id = self.db.export_map(m.name, m.to_json())
-                        text += f"\n\n📤 Карта «{m.name}» добавлена в список для игроков (ID {map_id})."
-                    else:
-                        text += "\n\nЭкспорт не выполнен."
-                await interaction.followup.send(text[:1990], ephemeral=True)
+                await interaction.followup.send(rep.text()[:1990], ephemeral=True)
+
+            elif act == "size":
+                await interaction.response.send_modal(InputModal(
+                    "Размер сетки", f"Ширина x высота (до {GRID_MAX_W}x{GRID_MAX_H})",
+                    lambda i, t: self.submit_size(i, sid, t),
+                    default=f"{m.width}x{m.height}", placeholder="12x10", max_length=7))
+
+            elif act == "export":
+                await interaction.response.defer()
+                rep = await asyncio.to_thread(validate_map, m)
+                if not rep.ok:
+                    await interaction.followup.send((rep.text() + "\n\nЭкспорт не выполнен.")[:1990],
+                                                    ephemeral=True)
+                    return
+                self.db.update_editor(sid, panel="preview", jitter_seed=new_seed())
+                note = "Проверка пройдена."
+                if rep.warnings:
+                    note += " Предупреждения: " + " ".join(f"• {w}" for w in rep.warnings[:3])
+                await self._redraw(interaction, self.db.get_editor(sid), m, note[:350])
+
+            elif act in ("jit_ok", "jit_again", "jit_back"):
+                if s["panel"] != "preview" or s["jitter_seed"] is None:
+                    await self._err(interaction, "Предпросмотр экспорта уже закрыт.")
+                    return
+                await interaction.response.defer()
+                if act == "jit_again":
+                    self.db.update_editor(sid, jitter_seed=new_seed())
+                    await self._redraw(interaction, self.db.get_editor(sid), m, "Новый вариант.")
+                elif act == "jit_back":
+                    self.db.update_editor(sid, panel="menu", jitter_seed=None)
+                    await self._redraw(interaction, self.db.get_editor(sid), m)
+                else:
+                    rep = await asyncio.to_thread(validate_map, m)
+                    if not rep.ok:                                   # карту успели испортить: экспорт не делаем
+                        self.db.update_editor(sid, panel="main", jitter_seed=None)
+                        await self._redraw(interaction, self.db.get_editor(sid), m,
+                                           "Экспорт отменён: карта не прошла проверку.")
+                        return
+                    final = jittered(m, s["jitter_seed"])            # тот же seed -> ровно тот вариант, что на картинке
+                    map_id = self.db.export_map(m.name, final.to_json())
+                    self.db.update_editor(sid, panel="main", jitter_seed=None)
+                    await self._redraw(interaction, self.db.get_editor(sid), m,
+                                       f"📤 Карта «{esc(m.name)}» экспортирована в список для игроков (ID {map_id}). "
+                                       "Черновик остался ровным.")
 
             elif act == "rename":
                 await interaction.response.send_modal(InputModal(
@@ -584,6 +642,32 @@ class EditorController:
             self.db.rename_draft(old, new, m.to_json())
             self.db.update_editor(sid, map_name=new)
             await self._commit(interaction, sid, m, f"Новое название: {esc(new)}")
+
+    async def submit_size(self, interaction: discord.Interaction, sid: int, text: str):
+        async with self.locks[sid]:
+            got = await self._enter(interaction, sid)
+            if got is None:
+                return
+            s, m = got
+            mt = re.fullmatch(r"\s*(\d{1,2})\s*[xXхХ×*]\s*(\d{1,2})\s*", text)
+            if not mt:
+                await self._err(interaction, "Введите размер как ШИРИНАxВЫСОТА, например 12x10.")
+                return
+            w, h = int(mt.group(1)), int(mt.group(2))
+            if not (1 <= w <= GRID_MAX_W and 1 <= h <= GRID_MAX_H):
+                await self._err(interaction, f"Допустимо от 1x1 до {GRID_MAX_W}x{GRID_MAX_H}.")
+                return
+            outside = []
+            for cid in m.cells:
+                p = parse_cell_id(cid)
+                if p is None or p[0] >= w or p[1] >= h:
+                    outside.append(cid)
+            if outside:
+                await self._err(interaction, "Нельзя уменьшить: за новыми границами остались ячейки: "
+                                + ", ".join(sorted(outside)[:12]) + ". Сначала удалите их.")
+                return
+            m.width, m.height = w, h
+            await self._commit(interaction, sid, m, f"Размер сетки: {w}×{h}")
 
     # ---------- Консоль ----------
 

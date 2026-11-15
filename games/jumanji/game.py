@@ -56,6 +56,8 @@ class Runtime:
     deadline: Optional[datetime] = None
     task: Optional[asyncio.Task] = None
     log: list = field(default_factory=list)
+    ping_id: Optional[int] = None       # сообщение «ваш ход» с настоящим тегом
+    ping_pid: Optional[int] = None      # кому оно адресовано
 
 class JumanjiController:
     def __init__(self, bot, storage: Storage):
@@ -117,7 +119,7 @@ class JumanjiController:
                 self.db.abort(gid, "error")
                 continue
             self.rt[gid] = rt
-            self.bot.add_view(PlayView(self, gid, locked=rt.match.awaiting_minigame), message_id=g["message_id"])
+            self.bot.add_view(self._play_view(rt), message_id=g["message_id"])
             self._spawn(self._resume(rt))
 
     def _load_runtime(self, g) -> Optional[Runtime]:
@@ -372,7 +374,8 @@ class JumanjiController:
             elif p.finished:
                 await interaction.response.send_message("Вы уже дошли до финиша.", ephemeral=True)
             elif m.current_player.pid != uid:
-                await interaction.response.send_message("Сейчас не ваш ход.", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Сейчас не ваш ход: ходит {self._label(rt, m.current_player.pid)}.", ephemeral=True)
             else:
                 await interaction.response.defer()
                 await self._after(rt, m.roll())
@@ -419,14 +422,16 @@ class JumanjiController:
     # ==================== Идущая партия: ядро ====================
 
     async def _after(self, rt: Runtime, events: list, rearm: bool = True, bump: bool = False):
-        """После любого изменения партии (вызывать под блокировкой): лог, таймер, сохранение, табло."""
+        """После любого изменения партии (вызывать под блокировкой): лог, таймер, сохранение, табло, пинг хода."""
         self._log(rt, events)
         m = rt.match
         if m.over:
             self._cancel(rt)
             rt.deadline = None
             self.db.finish(rt.game_id, m.snapshot())
-            await self._publish(rt, bump=bump)
+            await self._drop_ping(rt)
+            await self._publish(rt, bump=bump)          # табло: итоговая картинка и расстановка
+            await self._send_results(rt)                # итоги: отдельным сообщением
             self.rt.pop(rt.game_id, None)
             self.locks.pop(rt.game_id, None)
             return
@@ -434,6 +439,7 @@ class JumanjiController:
             self._arm(rt)
         self._save(rt)
         await self._publish(rt, bump=bump)
+        await self._sync_ping(rt, reset=bump)
         if m.awaiting_minigame and any(e.kind == "minigame" for e in events):
             self._spawn(self._minigame(rt))
 
@@ -511,6 +517,60 @@ class JumanjiController:
 
     # ==================== Табло ====================
 
+    def _play_view(self, rt: Runtime) -> Optional[PlayView]:
+        """Кнопки под табло: кубик доступен только в ход человека (в ход бота и во время мини-игры он выключен)."""
+        m = rt.match
+        if m.over:
+            return None
+        cur = m.current_player
+        locked = m.awaiting_minigame or cur.is_bot
+        return PlayView(self, rt.game_id, locked=locked,
+                        turn_name="" if locked else str(rt.names.get(cur.pid, "")))
+
+    async def _drop_ping(self, rt: Runtime):
+        mid, rt.ping_id, rt.ping_pid = rt.ping_id, None, None
+        if mid:
+            try:
+                await self.bot.get_partial_messageable(rt.channel_id).get_partial_message(mid).delete()
+            except discord.HTTPException:
+                pass
+
+    async def _sync_ping(self, rt: Runtime, reset: bool = False):
+        """Отдельное сообщение с настоящим тегом, когда ход переходит к человеку.
+        Удаляется, когда ход ушёл дальше. reset=True: прислать заново (табло только что поднялось вниз канала)."""
+        m = rt.match
+        want = None
+        if not m.over and not m.awaiting_minigame and not m.current_player.is_bot:
+            want = m.current_player.pid
+        if reset or want != rt.ping_pid:
+            await self._drop_ping(rt)
+        if want is None or rt.ping_pid == want:
+            return
+        try:
+            msg = await self.bot.get_partial_messageable(rt.channel_id).send(
+                f"🎲 <@{want}>, ваш ход! Нажмите «Бросить кубик» (на ход {TURN_SECONDS} с).",
+                allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=want)]))
+            rt.ping_id, rt.ping_pid = msg.id, want
+        except discord.HTTPException:
+            log.exception("Не удалось прислать сообщение о ходе (партия #%s)", rt.game_id)
+
+    def _results_text(self, rt: Runtime) -> str:
+        m = rt.match
+        lines = [f"🏁 **Джуманджи** · партия #{rt.game_id} окончена · карта «{esc(rt.gmap.name)}»", "",
+                 "**Итоговые места:**"]
+        for i, p in enumerate(m.standings):
+            place = MEDALS[i] if i < len(MEDALS) else f"{i + 1}."
+            lines.append(f"{place} {self._label(rt, p.pid)}" + (" (вышел)" if p.left else ""))
+        lines += ["", "Для новой партии используйте /jumanji."]
+        return "\n".join(lines)[:1990]
+
+    async def _send_results(self, rt: Runtime):
+        try:
+            await self.bot.get_partial_messageable(rt.channel_id).send(
+                self._results_text(rt), allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            log.exception("Не удалось отправить итоги партии #%s", rt.game_id)
+
     def _label(self, rt: Runtime, pid: int) -> str:
         name = esc(rt.names.get(pid, pid))
         if pid in BOT_IDS:
@@ -570,7 +630,7 @@ class JumanjiController:
 
     def _player_line(self, rt: Runtime, p: Player) -> str:
         m = rt.match
-        mark = "▶️" if (p is m.current_player and not m.awaiting_minigame) else "▫️"
+        mark = "▶️" if (not m.over and p is m.current_player and not m.awaiting_minigame) else "▫️"
         if p.finished:
             status = f"🏁 финишировал, место {p.place}"
         elif p.left:
@@ -586,13 +646,10 @@ class JumanjiController:
     def _board_text(self, rt: Runtime) -> str:
         m = rt.match
         lines = [f"🎲 **Джуманджи** · партия #{rt.game_id} · карта «{esc(rt.gmap.name)}»"]
+        lines += [self._player_line(rt, p) for p in m.players]
         if m.over:
-            lines.append("🏁 **Партия окончена.** Итоговые места:")
-            for i, p in enumerate(m.standings):
-                lines.append(f"{MEDALS[i] if i < len(MEDALS) else i + 1} {self._label(rt, p.pid)}"
-                             + (" (вышел)" if p.left else ""))
+            lines.append("🏁 **Партия окончена.** Итоговые места — в сообщении ниже.")
         else:
-            lines += [self._player_line(rt, p) for p in m.players]
             cur = m.current_player
             if m.awaiting_minigame:
                 lines.append("🟡 **Идёт мини-игра**: смотрите сообщения ниже. Кубик пока недоступен.")
@@ -620,7 +677,7 @@ class JumanjiController:
         except Exception:
             log.exception("Не удалось нарисовать табло партии #%s", rt.game_id)
         content = self._board_text(rt)
-        view = None if m.over else PlayView(self, rt.game_id, locked=m.awaiting_minigame)
+        view = self._play_view(rt)
         chan = self.bot.get_partial_messageable(rt.channel_id)
 
         async def send_new():
@@ -660,6 +717,7 @@ class JumanjiController:
             self._cancel(rt)
         self._cancel_lobby_timer(game_id)
         self.db.abort(game_id, "error")
+        await self._drop_ping(rt)
         await report_error(interaction, error, closing_text="⚠️ Партия закрыта из-за технической ошибки.")
 
     async def _fail_silent(self, rt: Runtime):
@@ -667,6 +725,7 @@ class JumanjiController:
         self._cancel(rt)
         self.rt.pop(rt.game_id, None)
         self.db.abort(rt.game_id, "error")
+        await self._drop_ping(rt)
         chan = self.bot.get_partial_messageable(rt.channel_id)
         try:
             await chan.get_partial_message(rt.message_id).edit(
