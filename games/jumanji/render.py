@@ -28,7 +28,7 @@ BG = (43, 45, 49, 255)
 NORMAL = (214, 217, 222)
 EFFECT_COLORS = {
     "jump": (59, 165, 93), "back": (237, 66, 69), "skip": (240, 147, 43),
-    "charge": (51, 160, 240), "mini": (247, 209, 84), "reset": (24, 25, 28),
+    "charge": (51, 160, 240), "mini": (170, 60, 255), "reset": (24, 25, 28),
 }
 FINISH_FILL = (240, 240, 240)
 START_RING = (80, 200, 220)
@@ -264,7 +264,7 @@ def _dashed_poly(d, pts, color, width, dash, gap):
                 left = dash if on else gap
 
 def _poly_arrow(d, pts, color, width, head):
-    """Пунктирная стрелка вдоль ломаной; наконечник направлен по касательной к концу."""
+    """Сплошная стрелка вдоль ломаной; наконечник направлен по касательной к концу."""
     if len(pts) < 2:
         return
     tip, back = pts[-1], pts[0]
@@ -278,7 +278,12 @@ def _poly_arrow(d, pts, color, width, head):
         return
     ux, uy = ux / ln, uy / ln
     base = (tip[0] - ux * head, tip[1] - uy * head)
-    _dashed_poly(d, pts, color, width, 10 * SS, 7 * SS)
+
+    body = [p for p in pts if math.dist(p, tip) > head]     # тело стрелки без участка под наконечником
+    body.append(base)
+    if len(body) >= 2:
+        d.line(body, fill=color, width=width, joint="curve")
+
     nx, ny = -uy, ux
     d.polygon([tip, (base[0] + nx * head * 0.6, base[1] + ny * head * 0.6),
                (base[0] - nx * head * 0.6, base[1] - ny * head * 0.6)], fill=color)
@@ -360,7 +365,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
                 d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
                        font=label_font, fill=(125, 130, 140, 255))
 
-    # пунктир прыжков и откатов: прямая или дуга, обходящая все остальные ячейки
+    # стрелки прыжков и откатов: сплошная линия, прямая или дуга, обходящая все остальные ячейки
     box = (3 * SS, 3 * SS, W - 3 * SS, H - 3 * SS)
     safe = R + 6 * SS
     for cid, c in m.cells.items():
@@ -368,7 +373,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
             obstacles = [p for k, p in centers.items() if k != cid and k != c.target]
             pts = _route(centers[cid], centers[c.target], obstacles, box, safe)
             pts = _trim(pts, centers[cid], centers[c.target], R + 3 * SS, R + 3 * SS)
-            _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (170,), 4 * SS, 12 * SS)
+            _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (255,), 4 * SS, 12 * SS)
 
     # стрелки маршрута
     for cid, c in m.cells.items():
@@ -397,7 +402,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
             kind, fill, ring, fg = None, NORMAL, (150, 153, 160), None
         width = (6 if kind in ("start", "finish") else 4) * SS
         d.ellipse((cx - R, cy - R, cx + R, cy + R), fill=fill + (a,), outline=ring + (a,), width=width)
-        if kind:
+        if kind in ("start", "finish"):
             _icon(d, kind, cx, cy, fg + (a,))
         if on and kind is None or (on and kind in EFFECT_COLORS):
             d.text((cx - CELL / 2 * SS + 6 * SS, cy - CELL / 2 * SS + 3 * SS), str(index[cid]),

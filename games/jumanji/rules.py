@@ -22,7 +22,7 @@ GRID_DEFAULT_H = 8
 EFFECTS = ("jump", "back", "skip", "charge", "mini", "reset")
 TARGET_EFFECTS = ("jump", "back")      # эффекты, которым нужна клетка-цель
 
-EFFECT_ICONS = {"jump": "🟢", "back": "🔴", "skip": "🟠", "charge": "🔵", "mini": "🟡", "reset": "⚫"}
+EFFECT_ICONS = {"jump": "🟢", "back": "🔴", "skip": "🟠", "charge": "🔵", "mini": "🟣", "reset": "⚫"}
 EFFECT_TITLES = {
     "jump": "Перепрыгнуть", "back": "Откатить", "skip": "Пропустить",
     "charge": "Зарядить", "mini": "Мини-игра", "reset": "Сбросить",
