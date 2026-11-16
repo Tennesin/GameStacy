@@ -8,10 +8,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-from PIL import Image, ImageDraw, ImageFont
-
-from .models import GameMap, parse_cell_id, trace_path
+from .models import GameMap, parse_cell_id, side_chains, trace_path
 from .rules import BOT_IDS
 
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
@@ -29,7 +28,10 @@ NORMAL = (214, 217, 222)
 EFFECT_COLORS = {
     "jump": (59, 165, 93), "back": (237, 66, 69), "skip": (240, 147, 43),
     "charge": (51, 160, 240), "mini": (170, 60, 255), "reset": (24, 25, 28),
+    "branch": (250, 204, 21),
 }
+STRIPE = (250, 204, 21)              # диагональные полоски на клетках особого пути
+SIDE_LINK = (214, 170, 40, 255)      # стрелки внутри дороги
 FINISH_FILL = (240, 240, 240)
 START_RING = (80, 200, 220)
 FINISH_RING = (255, 196, 40)
@@ -207,9 +209,7 @@ def _min_dist(pts, obstacles) -> float:
     return best
 
 def _route(a, b, obstacles, box, safe):
-    """Путь от a к b, не задевающий круги ячеек (obstacles — их центры; safe — минимальный зазор до центра).
-    Сначала пробует прямую, затем дуги всё большего изгиба с обеих сторон. Дуга обязана лежать внутри box.
-    Если чистого пути нет, берётся дуга с наибольшим зазором."""
+    """Путь от a к b, не задевающий круги ячеек."""
     L = math.hypot(b[0] - a[0], b[1] - a[1])
     if L < 1:
         return [a, b]
@@ -322,6 +322,18 @@ def _icon(d, kind: str, cx: float, cy: float, fg):
                             fill=fg if (i + j) % 2 == 0 else (255, 255, 255, fg[3] if len(fg) > 3 else 255))
         d.rectangle(P([(-14, -14), (14, 14)]), outline=fg, width=2 * k)
 
+def _stripes(img, cx: float, cy: float, R: int, alpha: int):
+    """Диагональные жёлтые полоски внутри круга ячейки."""
+    size = int(2 * R)
+    tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tile)
+    for k in range(-size, 2 * size, 20 * SS):
+        td.line([(k, size), (k + size, 0)], fill=STRIPE + (alpha,), width=8 * SS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    tile.putalpha(ImageChops.multiply(tile.getchannel("A"), mask))
+    img.alpha_composite(tile, (int(cx - R), int(cy - R)))
+
 def _bounds(m: GameMap, show_grid: bool) -> tuple:
     pts = [p for p in (parse_cell_id(c) for c in m.cells) if p]
     if show_grid or not pts:
@@ -333,6 +345,14 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     """PNG-табло. tokens — фишки (make_tokens)."""
     path, _problem = trace_path(m)
     index = {cid: i for i, cid in enumerate(path)}
+    chains, _bad = side_chains(m, path)
+    full = list(path)                                         # клетки в том же порядке, что индексы позиций у Track
+    side_label = {}                                           # клетка дороги -> подпись вида «12.3»
+    for bid, chain, _exit in chains:
+        for k, cid in enumerate(chain, start=1):
+            full.append(cid)
+            side_label[cid] = f"{index[bid]}.{k}"
+
     x0, y0, x1, y1 = _bounds(m, show_grid)
     shift = 0.0 if show_grid else max((max(abs(c.dx), abs(c.dy)) for c in m.cells.values()), default=0.0)
     pad = PAD + math.ceil(shift * CELL)                       # поля растут, чтобы сдвинутые ячейки не обрезались
@@ -376,12 +396,18 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
             pts = _trim(pts, centers[cid], centers[c.target], R + 3 * SS, R + 3 * SS)
             _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (255,), 4 * SS, 12 * SS)
 
-    # стрелки маршрута
+    # стрелки маршрута (внутри дороги — жёлтые)
     for cid, c in m.cells.items():
         if cid == m.finish or cid == c.next or not drawable(cid) or not drawable(c.next):
             continue
-        _arrow(d, centers[cid], centers[c.next], LINK_ON if cid in index else LINK_OFF,
-               5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS)
+        color = SIDE_LINK if cid in side_label else (LINK_ON if cid in index else LINK_OFF)
+        _arrow(d, centers[cid], centers[c.next], color, 5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS)
+
+    # связь «начало особого пути -> первая клетка дороги»: жёлтый пунктир
+    for cid, c in m.cells.items():
+        if c.effect == "branch" and drawable(cid) and drawable(c.target):
+            _arrow(d, centers[cid], centers[c.target], EFFECT_COLORS["branch"] + (255,),
+                   5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS, dashed=True)
 
     # ячейки
     small, _ = _font(15 * SS)
@@ -389,7 +415,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         if not drawable(cid):
             continue
         cx, cy = centers[cid]
-        on = cid in index
+        on = cid in index or cid in side_label
         a = 255 if on else ORPHAN_ALPHA
         if cid == m.finish:
             kind, fill, ring, fg = "finish", FINISH_FILL, FINISH_RING, (30, 30, 30)
@@ -402,12 +428,18 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         else:
             kind, fill, ring, fg = None, NORMAL, (150, 153, 160), None
         width = (6 if kind in ("start", "finish") else 4) * SS
-        d.ellipse((cx - R, cy - R, cx + R, cy + R), fill=fill + (a,), outline=ring + (a,), width=width)
+        circle = (cx - R, cy - R, cx + R, cy + R)
+        d.ellipse(circle, fill=fill + (a,), outline=ring + (a,), width=width)
+        if c.side:                                            # клетка дороги: полоски, затем снова кайма поверх них
+            _stripes(img, cx, cy, R, a)
+            d.ellipse(circle, outline=ring + (a,), width=width)
         if kind in ("start", "finish"):
             _icon(d, kind, cx, cy, fg + (a,))
-        if on and kind is None or (on and kind in EFFECT_COLORS):
-            d.text((cx - CELL / 2 * SS + 6 * SS, cy - CELL / 2 * SS + 3 * SS), str(index[cid]),
-                   font=small, fill=(190, 194, 202, 255))
+        if on and (kind is None or kind in EFFECT_COLORS):
+            label = str(index[cid]) if cid in index else side_label.get(cid)
+            if label:
+                d.text((cx - CELL / 2 * SS + 6 * SS, cy - CELL / 2 * SS + 3 * SS), label,
+                       font=small, fill=(190, 194, 202, 255))
         if cid == selected:
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)
@@ -415,10 +447,10 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     # фишки: на одной ячейке несколько — все, кроме ходящего, затемнены
     groups: dict = {}
     for t in tokens:
-        if 0 <= t.pos < len(path):
+        if 0 <= t.pos < len(full):
             groups.setdefault(t.pos, []).append(t)
     for pos, group in groups.items():
-        cx, cy = centers[path[pos]]
+        cx, cy = centers[full[pos]]
         shared = len(group) > 1
         items = sorted(zip(group, _slots(len(group))), key=lambda it: it[0].current)   # ходящий — сверху
         for tok, (dx, dy, dia) in items:

@@ -6,19 +6,20 @@
   таймер хода:  events = match.roll(timed_out=True)
   мини-игра:    если match.awaiting_minigame — провести её и вызвать match.finish_minigame(winners)
   каждый вызов возвращает список Event; табло и тексты строит слой Discord."""
-
 import random
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
-from .models import GameMap, MapFormatError, trace_path
-from .rules import (DICE_SIDES, EFFECTS, MAX_EXTRA_ROLLS, MAX_PLAYERS, MIN_PLAYERS, REWARDS,
-                    RESET_TIMEOUTS_ON_ROLL, TARGET_EFFECTS, TIMEOUTS_TO_LEAVE)
+from .models import GameMap, MapFormatError, side_chains, trace_path
+from .rules import (
+    BRANCH, DICE_SIDES, EFFECTS, MAX_EXTRA_ROLLS, MAX_PLAYERS, MIN_PLAYERS,
+    REWARDS, RESET_TIMEOUTS_ON_ROLL, TARGET_EFFECTS, TIMEOUTS_TO_LEAVE
+)
 
 # ---------- Маршрут ----------
 
 class Track:
-    """Карта, превращённая в прямую трассу: ячейка = индекс 0..finish."""
+    """Карта, превращённая в трассу."""
 
     def __init__(self, m: GameMap):
         path, problem = trace_path(m)
@@ -28,12 +29,21 @@ class Track:
             raise MapFormatError("Нужно минимум две ячейки: старт и финиш.")
         index = {cid: i for i, cid in enumerate(path)}
         self.name = m.name
-        self.cells = path                          # индекс -> id ячейки
+        self.cells = list(path)                    # индекс -> id ячейки
+        self.main_len = len(path)
         self.finish = len(path) - 1
         self.effects = [None] * len(path)          # индекс -> эффект
         self.targets = [None] * len(path)          # индекс -> индекс цели (jump / back)
+        self.entry: dict = {}                      # индекс начала особого пути -> индекс первой клетки дороги
+        self.succ: dict = {}                       # индекс клетки дороги -> индекс следующей клетки
+        self.pred: dict = {}                       # индекс клетки дороги -> индекс предыдущей (или начала)
+        self.owner: dict = {}                      # индекс клетки дороги -> индекс начала её пути
+        self.step_no: dict = {}                    # индекс клетки дороги -> её номер на дороге (с 1)
+
         for i in range(1, self.finish):            # у старта и финиша эффектов нет
             c = m.cells[path[i]]
+            if c.side:
+                raise MapFormatError(f"Основной маршрут проходит по клетке особого пути {c.id}.")
             if not c.effect:
                 continue
             if c.effect not in EFFECTS:
@@ -45,6 +55,67 @@ class Track:
                 self.targets[i] = t
             self.effects[i] = c.effect
 
+        chains, problems = side_chains(m, path)
+        if problems:
+            raise MapFormatError(problems[0])
+        for bid, chain, exit_id in chains:
+            b, exit_idx = index[bid], index[exit_id]
+            self.entry[b] = len(self.cells)
+            for k, cid in enumerate(chain):
+                i = len(self.cells)
+                self.cells.append(cid)
+                self.effects.append(None)
+                self.targets.append(None)
+                self.pred[i] = b if k == 0 else i - 1
+                self.succ[i] = i + 1 if k < len(chain) - 1 else exit_idx
+                self.owner[i] = b
+                self.step_no[i] = k + 1
+
+    def is_side(self, i: int) -> bool:
+        return i >= self.main_len
+
+    def next_cell(self, i: int, committed: bool = False) -> int:
+        """Куда ведёт один шаг вперёд. committed — игрок стоит на начале особого пути и идёт по нему."""
+        if i in self.succ:
+            return self.succ[i]
+        if committed and i in self.entry:
+            return self.entry[i]
+        return i + 1
+
+    def remaining(self, pos: int, committed: bool = False) -> int:
+        """Сколько шагов до финиша по маршруту игрока."""
+        n = 0
+        while pos != self.finish:
+            pos, committed = self.next_cell(pos, committed), False
+            n += 1
+        return n
+
+    def forward(self, pos: int, committed: bool, n: int) -> int:
+        """Вперёд на n шагов, но не дальше клетки перед финишем (финиширует только бросок)."""
+        for _ in range(n):
+            nxt = self.next_cell(pos, committed)
+            if nxt == self.finish:
+                break
+            pos, committed = nxt, False
+        return pos
+
+    def back(self, pos: int, n: int) -> int:
+        """Назад на n шагов: с дороги — по дороге к её началу, дальше по основному маршруту."""
+        for _ in range(n):
+            if self.is_side(pos):
+                pos = self.pred[pos]
+            elif pos > 0:
+                pos -= 1
+            else:
+                break
+        return pos
+
+    def label(self, i: int) -> str:
+        """Подпись клетки для игроков: «12» на маршруте, «12.3» — третья клетка дороги от клетки 12."""
+        if i < self.main_len:
+            return str(i)
+        return f"{self.owner[i]}.{self.step_no[i]}"
+
 @dataclass(frozen=True)
 class Step:
     """Итог одного броска (чистая функция, ей же пользуется проверка карты)."""
@@ -55,21 +126,29 @@ class Step:
     blocked: bool                # бросок больше остатка до финиша: игрок не ходит
     effect: Optional[str]        # сработавший эффект
     finished: bool
+    entered: bool = False        # бросок кончился ровно на начале особого пути
+    exited: bool = False         # по пути броска игрок сошёл с особого пути на обычный маршрут
 
-def roll_outcome(track: Track, pos: int, d: int) -> Step:
-    remaining = track.finish - pos
-    if d > remaining:                                        # «точечное» выбивание
-        return Step(d, pos, pos, pos, True, None, False)
-    landed = pos + d
+def roll_outcome(track: Track, pos: int, d: int, committed: bool = False) -> Step:
+    """committed — игрок стоит на начале особого пути и первый шаг сделает по дороге."""
+    cur, first, exited = pos, committed, False
+    for _ in range(d):
+        if cur == track.finish:                              # шаги остались, а финиш уже под ногами
+            return Step(d, pos, pos, pos, True, None, False)
+        nxt = track.next_cell(cur, first)
+        if track.is_side(cur) and not track.is_side(nxt):
+            exited = True
+        cur, first = nxt, False
+    landed = cur
     if landed == track.finish:
-        return Step(d, pos, landed, landed, False, None, True)
+        return Step(d, pos, landed, landed, False, None, True, False, exited)
     effect = track.effects[landed]
     end = landed
     if effect in ("jump", "back"):
         end = track.targets[landed]
     elif effect == "reset":
         end = 0
-    return Step(d, pos, landed, end, False, effect, end == track.finish)
+    return Step(d, pos, landed, end, False, effect, end == track.finish, effect == BRANCH, exited)
 
 def effective_bots(humans: int, setting: int) -> int:
     """Сколько ботов реально сядет за стол.
@@ -93,6 +172,7 @@ class Player:
     leave_order: int = 0
     place: Optional[int] = None
     bonus: Optional[str] = None  # награда мини-игры на следующий ход: "x2" или "double_roll"
+    on_branch: bool = False      # стоит на начале особого пути: следующий ход пойдёт по дороге
 
     @property
     def on_map(self) -> bool:
@@ -102,7 +182,7 @@ class Player:
 class Event:
     """kind: turn, roll, blocked, move, jump, back, reset, skip_set, skip_used, charge, charge_denied,
     minigame, reward, reward_none, reward_move, bonus_set, bonus_roll, finished, timeout, left, joined,
-    game_over."""
+    branch (встал на начало особого пути), rejoin (сошёл с особого пути), game_over."""
     kind: str
     pid: int = 0
     data: dict = field(default_factory=dict)
@@ -227,15 +307,19 @@ class Match:
         mult = 2 if bonus == "x2" else 1
         if bonus == "double_roll":
             self.bonus_rolls += 1
-        step = roll_outcome(self.track, p.pos, d * mult)
+        step = roll_outcome(self.track, p.pos, d * mult, p.on_branch)
         ev = [Event("roll", p.pid, {"d": d, "mult": mult, "total": d * mult})]
 
-        if step.blocked:
-            ev.append(Event("blocked", p.pid, {"d": d * mult, "left": self.track.finish - p.pos}))
+        if step.blocked:                                      # заход на особый путь при этом сохраняется
+            ev.append(Event("blocked", p.pid,
+                            {"d": d * mult, "left": self.track.remaining(p.pos, p.on_branch)}))
             return ev + self._end_roll(p)
 
+        p.on_branch = False                                   # любой реальный шаг «тратит» заход
         p.pos = step.landed
         ev.append(Event("move", p.pid, {"from": step.start, "to": step.landed}))
+        if step.exited:
+            ev.append(Event("rejoin", p.pid, {"to": step.landed}))
         if step.effect in ("jump", "back", "reset"):
             p.pos = step.end                                  # эффект в клетке назначения не срабатывает
             ev.append(Event(step.effect, p.pid, {"from": step.landed, "to": step.end}))
@@ -256,6 +340,9 @@ class Match:
             ev.append(Event("minigame", p.pid,
                             {"players": [q.pid for q in self.players if q.on_map]}))
             return ev
+        elif step.effect == BRANCH:                           # ровно на начале: дальше пойдёт по дороге
+            p.on_branch = True
+            ev.append(Event("branch", p.pid))
         return ev + self._end_roll(p)
 
     def finish_minigame(self, winners: list) -> list:
@@ -280,21 +367,21 @@ class Match:
     # ---------- Внутреннее ----------
 
     def _apply_reward(self, reward: dict, winners: list) -> list:
-        kind, ev, last = reward["kind"], [], self.track.finish - 1
+        kind, ev = reward["kind"], []
         others = [p for p in self.players if p.on_map and p.pid not in winners]
         if kind == "forward":
             for pid in winners:
                 p = self.get(pid)
-                new = min(p.pos + reward["n"], max(p.pos, last))   # финиширует только бросок
+                new = self.track.forward(p.pos, p.on_branch, reward["n"])   # финиширует только бросок
                 if new != p.pos:
                     ev.append(Event("reward_move", pid, {"from": p.pos, "to": new}))
-                    p.pos = new
+                    p.pos, p.on_branch = new, False
         elif kind == "back_others":
             for p in others:
-                new = max(0, p.pos - reward["n"])
+                new = self.track.back(p.pos, reward["n"])
                 if new != p.pos:
                     ev.append(Event("reward_move", p.pid, {"from": p.pos, "to": new}))
-                    p.pos = new
+                    p.pos, p.on_branch = new, False
         elif kind in ("double_roll", "x2"):
             for pid in winners:
                 self.get(pid).bonus = kind
@@ -352,12 +439,13 @@ class Match:
             return ev
 
     def _finalize(self) -> list:
-        """Места: дошедшие по порядку, затем оставшиеся по позиции, затем вышедшие (поздний выше)."""
+        """Места: дошедшие по порядку, затем оставшиеся по близости к финишу, затем вышедшие (поздний выше)."""
         if self.over:
             return []
         self.over = True
         done = sorted((p for p in self.players if p.finished), key=lambda p: p.place)
-        rest = sorted((p for p in self.players if p.on_map), key=lambda p: -p.pos)   # при равенстве — по порядку хода
+        rest = sorted((p for p in self.players if p.on_map),
+                      key=lambda p: self.track.remaining(p.pos, p.on_branch))   # при равенстве — по порядку хода
         gone = sorted((p for p in self.players if p.left), key=lambda p: -p.leave_order)
         self.standings = done + rest + gone
         for i, p in enumerate(self.standings, start=1):

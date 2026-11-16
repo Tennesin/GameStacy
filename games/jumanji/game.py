@@ -36,7 +36,9 @@ MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
 RULES_TEXT = ("**Правила.** Бросайте кубик по очереди (на ход 30 секунд) и идите к финишу. "
               "Если до финиша осталось меньше, чем выпало, вы остаётесь на месте: финиш берётся точным броском.\n"
               "Цветные клетки: 🟢 прыжок вперёд, 🔴 откат, 🟠 пропуск хода, 🔵 ещё бросок, "
-              "🟣 мини-игра для всех, ⚫ возврат на старт.\n"
+              "🟣 мини-игра для всех, ⚫ возврат на старт, "
+              "🟡 особый путь: если встали на неё точным броском, дальше идёте по жёлтой дороге до её конца; "
+              "если перешагнули, идёте как обычно.\n"
               "Три пропущенных хода подряд — вы выбываете. Партия идёт, пока на карте не останется один игрок.")
 
 def esc(text) -> str:
@@ -649,17 +651,22 @@ class JumanjiController:
     def _describe(self, rt: Runtime, ev) -> Optional[str]:
         k, d = ev.kind, ev.data
         n = self._label(rt, ev.pid) if ev.pid else ""
+        lab = rt.match.track.label                                 # подпись клетки: «12» или «12.3» на дороге
         if k == "roll":
             extra = f" ×2 = **{d['total']}**" if d.get("mult", 1) > 1 else ""
             return f"🎲 {n}: выпало **{d['d']}**{extra}"
         if k == "blocked":
             return f"⛔ {n}: до финиша {d['left']}, а выпало {d['d']} — остаётся на месте"
         if k == "move":
-            return f"➡️ {n} идёт на клетку {d['to']}"
+            return f"➡️ {n} идёт на клетку {lab(d['to'])}"
+        if k == "branch":
+            return f"🟡 {n} встаёт на начало особого пути: следующий ход пойдёт по нему"
+        if k == "rejoin":
+            return f"🟡 {n} сходит с особого пути"
         if k == "jump":
-            return f"🟢 {n} перепрыгивает на клетку {d['to']}"
+            return f"🟢 {n} перепрыгивает на клетку {lab(d['to'])}"
         if k == "back":
-            return f"🔴 {n} откатывается на клетку {d['to']}"
+            return f"🔴 {n} откатывается на клетку {lab(d['to'])}"
         if k == "reset":
             return f"⚫ {n} возвращается на старт"
         if k == "skip_set":
@@ -679,7 +686,7 @@ class JumanjiController:
         if k == "reward_none":
             return "🎁 Победителей нет: награды не будет"
         if k == "reward_move":
-            return f"🎁 {n}: клетка {d['from']} → {d['to']}"
+            return f"🎁 {n}: клетка {lab(d['from'])} → {lab(d['to'])}"
         if k == "bonus_set":
             return f"🎁 {n}: {BONUS_LABELS.get(d['bonus'], d['bonus'])}"
         if k == "finished":
@@ -705,7 +712,11 @@ class JumanjiController:
         elif p.left:
             status = "🚪 вышел"
         else:
-            status = f"клетка {p.pos} из {m.track.finish}"
+            status = f"клетка {m.track.label(p.pos)} из {m.track.finish}"
+            if m.track.is_side(p.pos):
+                status += " · 🟡 особый путь"
+            elif p.on_branch:
+                status += " · 🟡 пойдёт по особому пути"
             if p.skip:
                 status += f" · ⏭ пропуск ×{p.skip}"
             if p.bonus:

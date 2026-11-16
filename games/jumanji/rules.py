@@ -19,13 +19,15 @@ GRID_MAX_H = 17                        # строки
 GRID_DEFAULT_W = 10                    # размер новой карты (меняется в редакторе: Меню -> Размер сетки)
 GRID_DEFAULT_H = 8
 
-EFFECTS = ("jump", "back", "skip", "charge", "mini", "reset")
-TARGET_EFFECTS = ("jump", "back")      # эффекты, которым нужна клетка-цель
+EFFECTS = ("jump", "back", "skip", "charge", "mini", "reset", "branch")
+TARGET_EFFECTS = ("jump", "back")      # эффекты, которым нужна клетка-цель в основном маршруте
+BRANCH = "branch"                      # начало особого пути; его target — первая клетка дороги
 
-EFFECT_ICONS = {"jump": "🟢", "back": "🔴", "skip": "🟠", "charge": "🔵", "mini": "🟣", "reset": "⚫"}
+EFFECT_ICONS = {"jump": "🟢", "back": "🔴", "skip": "🟠", "charge": "🔵",
+                "mini": "🟣", "reset": "⚫", "branch": "🟡"}
 EFFECT_TITLES = {
     "jump": "Перепрыгнуть", "back": "Откатить", "skip": "Пропустить",
-    "charge": "Зарядить", "mini": "Мини-игра", "reset": "Сбросить",
+    "charge": "Зарядить", "mini": "Мини-игра", "reset": "Сбросить", "branch": "Особый путь",
 }
 CELL_ICON, START_ICON, FINISH_ICON = "⚪", "🚩", "🏁"
 

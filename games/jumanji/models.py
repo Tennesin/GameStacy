@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .rules import BRANCH
+
 FORMAT_VERSION = 1
 _ID_RE = re.compile(r"^([A-Z])([0-9]{1,2})$")
 
@@ -33,10 +35,11 @@ def parse_cell_id(text) -> Optional[tuple]:
 class Cell:
     id: str
     next: Optional[str] = None       # следующая ячейка маршрута (у финиша не нужна)
-    effect: Optional[str] = None     # jump / back / skip / charge / mini / reset
-    target: Optional[str] = None     # цель для jump / back
+    effect: Optional[str] = None     # jump / back / skip / charge / mini / reset / branch
+    target: Optional[str] = None     # цель для jump / back; для branch — первая клетка дороги
     dx: float = 0.0                  # визуальный сдвиг внутри клетки сетки (доли клетки), только для картинки
     dy: float = 0.0
+    side: bool = False               # клетка особого пути: в основной маршрут не входит, эффектов нет
 
 @dataclass
 class GameMap:
@@ -59,6 +62,8 @@ class GameMap:
             for key in ("next", "effect", "target"):
                 if getattr(c, key):
                     item[key] = getattr(c, key)
+            if c.side:
+                item["side"] = True
             if c.dx or c.dy:
                 item["dx"], item["dy"] = round(c.dx, 3), round(c.dy, 3)
             cells.append(item)
@@ -101,7 +106,8 @@ class GameMap:
             except (TypeError, ValueError):
                 raise MapFormatError(f"Некорректный сдвиг у ячейки {cid}.")
             m.cells[cid] = Cell(cid, norm_id(item.get("next")) or None, effect,
-                                norm_id(item.get("target")) or None, dx, dy)
+                                norm_id(item.get("target")) or None, dx, dy,
+                                side=bool(item.get("side")))
         return m
 
     @classmethod
@@ -115,8 +121,7 @@ class GameMap:
 # ---------- Обход маршрута ----------
 
 def trace_path(m: GameMap) -> tuple:
-    """Идёт от старта по полям next. Возвращает (список ячеек от старта, текст проблемы или None).
-    Проблема есть, если маршрут обрывается, ссылается в пустоту или зацикливается до финиша."""
+    """Идёт от старта по полям next."""
     cur = m.start
     if not cur or cur not in m.cells:
         return [], "Старт не задан или его нет на карте."
@@ -134,3 +139,51 @@ def trace_path(m: GameMap) -> tuple:
         if nxt not in m.cells:
             return path, f"Ячейка {cur} ведёт на несуществующую ячейку {nxt}."
         cur = nxt
+
+def follow_road(m: GameMap, first: Optional[str]) -> tuple:
+    """Идёт по клеткам дороги от первой клетки."""
+    chain, seen, cur = [], set(), first
+    while True:
+        if not cur:
+            if chain:
+                return chain, None, (f"дорога обрывается на {chain[-1]}: не указана следующая ячейка "
+                                     "(последняя клетка дороги должна вести на обычный маршрут).")
+            return chain, None, "не указана первая клетка дороги."
+        c = m.cells.get(cur)
+        if c is None:
+            return chain, None, f"дорога ведёт на несуществующую ячейку {cur}."
+        if not c.side:
+            if not chain:
+                return chain, None, f"первая клетка дороги ({cur}) не помечена как клетка особого пути."
+            return chain, cur, None
+        if cur in seen:
+            return chain, None, f"дорога зациклилась на ячейке {cur}: до обычного маршрута не дойти."
+        seen.add(cur)
+        chain.append(cur)
+        cur = c.next
+
+def side_chains(m: GameMap, path: list) -> tuple:
+    """Все особые пути карты в порядке их начал на основном маршруте (path)."""
+    on_main = set(path)
+    chains, problems, owner = [], [], {}
+    for bid in path[1:-1]:                              # на старте и финише эффектов нет
+        b = m.cells[bid]
+        if b.effect != BRANCH:
+            continue
+        chain, exit_id, problem = follow_road(m, b.target)
+        if problem:
+            problems.append(f"Особый путь от {bid}: {problem}")
+        clash = [cid for cid in chain if cid in owner]
+        if clash:
+            problems.append(f"Особый путь от {bid} использует клетки пути от {owner[clash[0]]} "
+                            f"({', '.join(clash[:5])}): у каждого пути должны быть свои клетки.")
+        else:
+            for cid in chain:
+                owner[cid] = bid
+        if exit_id is not None:
+            if exit_id == path[-1]:
+                problems.append(f"Особый путь от {bid} выходит прямо на финиш: финиш берётся только точным броском.")
+            elif exit_id not in on_main:
+                problems.append(f"Особый путь от {bid} выходит на {exit_id}, которой нет на основном маршруте.")
+        chains.append((bid, chain, exit_id))
+    return chains, problems

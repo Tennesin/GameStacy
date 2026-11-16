@@ -1,14 +1,15 @@
 """Проверка карты перед экспортом: ошибки блокируют экспорт, предупреждения только показываются."""
-
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from .logic import Track, roll_outcome
-from .models import GameMap, MapFormatError, parse_cell_id, trace_path
-from .rules import (DICE_SIDES, EFFECTS, EFFECT_SHARE_WARN, EFFECT_TITLES, GRID_MAX_H, GRID_MAX_W,
-                    MAP_NAME_MAX, MAX_EXTRA_ROLLS, MIN_PATH_WARN, SIM_FAIL_SHARE, SIM_LONG_TURNS,
-                    SIM_MAX_TURNS, SIM_RUNS, SIM_SEED, SIM_SHORT_TURNS, TARGET_EFFECTS)
+from .models import GameMap, MapFormatError, parse_cell_id, side_chains, trace_path
+from .rules import (
+    BRANCH, DICE_SIDES, EFFECTS, EFFECT_SHARE_WARN, EFFECT_TITLES, GRID_MAX_H, GRID_MAX_W,
+    MAP_NAME_MAX, MAX_EXTRA_ROLLS, MIN_PATH_WARN, SIM_FAIL_SHARE, SIM_LONG_TURNS,
+    SIM_MAX_TURNS, SIM_RUNS, SIM_SEED, SIM_SHORT_TURNS, TARGET_EFFECTS
+)
 
 @dataclass
 class Report:
@@ -68,6 +69,9 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
         err(f"Ячейки вне сетки или с неверными координатами: {_many(bad_pos)}.")
     if bad_eff:
         err(f"Неизвестные эффекты: {_many(bad_eff)}.")
+    side_fx = [cid for cid, c in m.cells.items() if c.side and c.effect]
+    if side_fx:
+        err(f"На клетках особого пути эффектов быть не может: {_many(side_fx)}.")
 
     # 3. Старт и финиш
     ends_ok = True
@@ -78,11 +82,14 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
         elif cid not in m.cells:
             err(f"{label} ({cid}) не поставлен на карту.")
             ends_ok = False
+        elif m.cells[cid].side:
+            err(f"{label} ({cid}) не может быть клеткой особого пути.")
+            ends_ok = False
     if ends_ok and m.start == m.finish:
         err("Старт и финиш — одна и та же ячейка.")
         ends_ok = False
 
-    # 4. Связи «следующая ячейка» (у каждой, кроме финиша)
+    # 4. Связи «следующая ячейка» (у каждой, кроме финиша; у последней клетки особого пути — выход на маршрут)
     no_next, self_next, bad_next = [], [], []
     for cid, c in m.cells.items():
         if cid == m.finish:
@@ -103,10 +110,10 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
         warn(f"У финиша указана следующая ячейка ({m.cells[m.finish].next}): она будет проигнорирована.")
     links_ok = not (no_next or self_next or bad_next)
 
-    # 5. Эффекты: на старте и финише нельзя; цели jump / back
+    # 5. Эффекты: на старте и финише нельзя; цели jump / back (у «Особого пути» цель проверяет side_chains)
     on_ends, no_target, bad_target, extra_target = [], [], [], []
     for cid, c in m.cells.items():
-        if c.effect not in EFFECTS:
+        if c.effect not in EFFECTS or c.side:
             continue
         if cid in (m.start, m.finish):
             on_ends.append(cid)
@@ -115,7 +122,7 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
                 no_target.append(cid)
             elif c.target not in m.cells:
                 bad_target.append(f"{cid}→{c.target}")
-        elif c.target:
+        elif c.effect != BRANCH and c.target:
             extra_target.append(cid)
     if on_ends:
         err(f"На старте и финише эффектов быть не может: {_many(on_ends)}.")
@@ -137,10 +144,21 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
         return r
 
     index = {cid: i for i, cid in enumerate(path)}
+    in_side = [cid for cid in path if m.cells[cid].side]
+    if in_side:
+        err(f"Основной маршрут заходит на клетки особого пути: {_many(in_side)}. Особый путь должен "
+            "начинаться с эффекта «Особый путь» на клетке маршрута, а не с обычной связи «далее».")
+        return r
+
+    chains, problems = side_chains(m, path)
+    for text in problems:
+        err(text)
+    owned = {cid for _b, chain, _e in chains for cid in chain}
     r.stats["path"] = len(path)
+    r.stats["branches"] = len(chains)
     if len(path) < MIN_PATH_WARN:
         warn(f"Маршрут очень короткий: {len(path)} ячеек (рекомендуется не меньше {MIN_PATH_WARN}).")
-    orphans = [cid for cid in m.cells if cid not in index]
+    orphans = [cid for cid in m.cells if cid not in index and cid not in owned]
     if orphans:
         warn(f"Не входят в маршрут от старта и будут проигнорированы: {_many(orphans)}.")
 
@@ -151,7 +169,7 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
             continue
         t = index.get(c.target)
         if t is None:
-            err(f"Цель эффекта ячейки {cid} ({c.target}) не лежит на маршруте.")
+            err(f"Цель эффекта ячейки {cid} ({c.target}) не лежит на основном маршруте.")
         elif c.effect == "jump" and t <= i:
             err(f"«Перепрыгнуть» в {cid} ведёт назад или на месте ({c.target}): прыжок должен идти вперёд.")
         elif c.effect == "back" and t >= i:
@@ -160,7 +178,7 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
             warn(f"«Перепрыгнуть» в {cid} ведёт прямо на финиш: игрок выиграет без точного броска.")
         elif m.cells[c.target].effect:
             warn(f"Цель эффекта ячейки {cid} ({c.target}) сама с эффектом: он не сработает "
-                 "(эффект не срабатывает после перемещения).")
+                 "(эффект не срабатывает после перемещения; на начале особого пути заход тоже не начнётся).")
 
     inner = path[1:-1]
     counts = Counter(m.cells[cid].effect for cid in inner if m.cells[cid].effect in EFFECTS)
@@ -179,51 +197,75 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
     return r
 
 def _analyze(track: Track, r: Report, runs: int):
-    """Граф состояний (позиция -> куда можно попасть) и моделирование одиночных партий."""
+    """Граф состояний (клетка, заход на особый путь) и моделирование одиночных партий."""
     err, warn = r.errors.append, r.warnings.append
     f = track.finish
+    start, goal = (0, False), (f, False)
 
+    states = [(i, False) for i in range(len(track.cells)) if i != f]
+    states += [(i, True) for i in track.entry]               # «стоит на начале и пойдёт по дороге»
     edges, lands = {}, {}
-    for i in range(f):
+    for s in states:
         ends, lnd = set(), set()
         for d in range(1, DICE_SIDES + 1):
-            s = roll_outcome(track, i, d)
-            ends.add(s.end)
-            if not s.blocked:
-                lnd.add(s.landed)
-        edges[i], lands[i] = ends, lnd
+            st = roll_outcome(track, s[0], d, s[1])
+            if st.blocked:
+                continue
+            ends.add((st.end, st.entered))
+            lnd.add(st.landed)
+        edges[s], lands[s] = ends, lnd
 
-    seen, stack = {0}, [0]                                   # достижимые от старта
+    seen, stack = {start}, [start]                           # достижимые от старта
     while stack:
-        for j in edges.get(stack.pop(), ()):
-            if j not in seen:
-                seen.add(j)
-                stack.append(j)
+        for t in edges.get(stack.pop(), ()):
+            if t not in seen:
+                seen.add(t)
+                stack.append(t)
 
     back = defaultdict(set)
-    for i, js in edges.items():
-        for j in js:
-            back[j].add(i)
-    good, stack = {f}, [f]                                   # откуда финиш достижим
+    for s, ts in edges.items():
+        for t in ts:
+            back[t].add(s)
+    good, stack = {goal}, [goal]                             # откуда финиш достижим
     while stack:
-        for i in back.get(stack.pop(), ()):
-            if i not in good:
-                good.add(i)
-                stack.append(i)
+        for s in back.get(stack.pop(), ()):
+            if s not in good:
+                good.add(s)
+                stack.append(s)
 
-    if f not in seen:
+    if goal not in seen:
         err("До финиша невозможно добраться броском кубика: на пути есть «стена» из эффектов, "
             "через которую нельзя перебраться (например шесть подряд клеток отката или сброса).")
         return
-    traps = sorted(i for i in seen if i not in good)
+    traps = sorted({s[0] for s in seen if s not in good})
     if traps:
         err("Есть ловушки: попав в эти ячейки, игрок уже не сможет дойти до финиша: "
             + _many(track.cells[i] for i in traps) + ".")
         return
 
+    # Основной маршрут не должен зависеть от особых путей: без захода на них до финиша можно дойти из любой
+    # клетки основного маршрута, куда игрок вообще может попасть.
+    free_back = defaultdict(set)
+    for s, ts in edges.items():
+        for t in ts:
+            if not t[1]:                                     # ребро не ведёт на заход
+                free_back[t].add(s)
+    free, stack = {goal}, [goal]
+    while stack:
+        for s in free_back.get(stack.pop(), ()):
+            if s not in free:
+                free.add(s)
+                stack.append(s)
+    forced = sorted({s[0] for s in seen if not s[1] and not track.is_side(s[0]) and s not in free})
+    if forced:
+        err("Игрок обязан пойти по особому пути: из этих ячеек до финиша нельзя дойти, не встав точно на начало "
+            "особого пути: " + _many(track.cells[i] for i in forced) + ". Основной маршрут не должен зависеть "
+            "от особых путей: разведите начала особых путей так, чтобы их можно было перешагнуть.")
+        return
+
     landed = set()
-    for i in seen:
-        landed |= lands.get(i, set())
+    for s in seen:
+        landed |= lands.get(s, set())
     dead = [track.cells[j] for j in range(1, f) if track.effects[j] and j not in landed]
     if dead:
         warn(f"На эти ячейки с эффектами нельзя попасть броском кубика: {_many(dead)}.")
@@ -231,13 +273,14 @@ def _analyze(track: Track, r: Report, runs: int):
     rng = random.Random(SIM_SEED)
     turns, capped = [], 0
     for _ in range(runs):
-        pos, n, done = 0, 0, False
+        pos, com, n, done = 0, False, 0, False
         while n < SIM_MAX_TURNS and not done:
             n += 1
             extra = 0
             while True:
-                s = roll_outcome(track, pos, rng.randint(1, DICE_SIDES))
-                pos = s.end
+                s = roll_outcome(track, pos, rng.randint(1, DICE_SIDES), com)
+                if not s.blocked:
+                    pos, com = s.end, s.entered
                 if s.finished:
                     done = True
                     break
