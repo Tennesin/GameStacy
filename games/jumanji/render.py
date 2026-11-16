@@ -21,7 +21,7 @@ BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 SS = 2
 CELL = 112                 # сторона клетки сетки
 RADIUS = 44                # радиус круга-ячейки
-PAD = 10                   # поля вокруг карты
+PAD = 36                   # поля вокруг карты
 MAX_SIDE = 1600            # итоговая картинка не больше этого по длинной стороне (сетка 16x16 иначе слишком тяжёлая)
 
 # ---------- Цвета ----------
@@ -105,10 +105,10 @@ def make_tokens(match, avatars: dict) -> list:
 def _slots(n: int) -> list:
     """Места фишек внутри ячейки: (смещение x, смещение y, диаметр)."""
     if n == 1:
-        return [(16, 16, 46)]
+        return [(0, 0, 62)]
     if n == 2:
-        return [(-18, 0, 40), (18, 0, 40)]
-    ring, dia = {3: (20, 34), 4: (24, 32)}.get(n, (25, 28))
+        return [(-21, 0, 42), (21, 0, 42)]
+    ring, dia = {3: (22, 38), 4: (25, 34)}.get(n, (26, 30))
     return [(ring * math.cos(-math.pi / 2 + 2 * math.pi * i / n),
              ring * math.sin(-math.pi / 2 + 2 * math.pi * i / n), dia) for i in range(n)]
 
@@ -187,57 +187,64 @@ def _arrow(d, a, b, color, width, head, start_off, end_off, dashed=False):
     d.polygon([tip, (base[0] + nx * head * 0.6, base[1] + ny * head * 0.6),
                (base[0] - nx * head * 0.6, base[1] - ny * head * 0.6)], fill=color)
 
-ARC_FACTORS = (0.0, 0.18, -0.18, 0.36, -0.36, 0.55, -0.55, 0.8, -0.8, 1.1, -1.1, 1.5, -1.5)
-
-def _bezier(a, c, b, steps):
+def _cubic(a, c1, c2, b, steps):
+    """Кубическая кривая Безье от a к b с контрольными точками c1 и c2."""
     pts = []
     for i in range(steps + 1):
         t = i / steps
         u = 1 - t
-        pts.append((u * u * a[0] + 2 * u * t * c[0] + t * t * b[0],
-                    u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]))
+        pts.append((u * u * u * a[0] + 3 * u * u * t * c1[0] + 3 * u * t * t * c2[0] + t * t * t * b[0],
+                    u * u * u * a[1] + 3 * u * u * t * c1[1] + 3 * u * t * t * c2[1] + t * t * t * b[1]))
     return pts
 
-def _near(pts, obstacles, margin):
-    """Только те центры, что лежат в рамке вокруг кривой: остальные заведомо дальше margin."""
-    x0, x1 = min(p[0] for p in pts) - margin, max(p[0] for p in pts) + margin
-    y0, y1 = min(p[1] for p in pts) - margin, max(p[1] for p in pts) + margin
-    return [o for o in obstacles if x0 <= o[0] <= x1 and y0 <= o[1] <= y1]
+def _intrusion(pts, a, b, trail, cells, trail_need, exempt, cell_need) -> float:
+    """Насколько путь заходит на тропу и на чужие ячейки (0 — путь чистый)."""
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    reach = max(trail_need, cell_need)
+    x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+    near_t = [o for o in trail if x0 <= o[0] <= x1 and y0 <= o[1] <= y1]
+    near_c = [o for o in cells if x0 <= o[0] <= x1 and y0 <= o[1] <= y1]
+    if not near_t and not near_c:
+        return 0.0
+    total = 0.0
+    for px, py in pts:
+        if near_t and math.hypot(px - a[0], py - a[1]) >= exempt and math.hypot(px - b[0], py - b[1]) >= exempt:
+            best = min((px - ox) ** 2 + (py - oy) ** 2 for ox, oy in near_t)
+            if best < trail_need * trail_need:
+                total += trail_need - math.sqrt(best)
+        for ox, oy in near_c:
+            dist = math.hypot(px - ox, py - oy)
+            if dist < cell_need:
+                total += cell_need - dist
+    return total
 
-def _is_clear(pts, obstacles, safe) -> bool:
-    safe2 = safe * safe
-    for ox, oy in _near(pts, obstacles, safe):
-        for px, py in pts:
-            if (px - ox) ** 2 + (py - oy) ** 2 < safe2:
-                return False
-    return True
-
-def _min_dist(pts, obstacles) -> float:
-    best = 1e18
-    for ox, oy in obstacles:
-        for px, py in pts:
-            best = min(best, (px - ox) ** 2 + (py - oy) ** 2)
-    return best
-
-def _route(a, b, obstacles, box, safe):
-    """Путь от a к b, не задевающий круги ячеек."""
+def _route(a, b, na, nb, trail, cells, box, half, R):
+    """Путь от a к b снаружи тропы."""
     L = math.hypot(b[0] - a[0], b[1] - a[1])
     if L < 1:
         return [a, b]
-    nx, ny = -(b[1] - a[1]) / L, (b[0] - a[0]) / L
-    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-    steps = max(16, int(L / (24 * SS)))
-    tried = []
-    for f in ARC_FACTORS:
-        pts = _bezier(a, (mx + nx * L * f, my + ny * L * f), b, steps)
-        if not all(box[0] <= x <= box[2] and box[1] <= y <= box[3] for x, y in pts):
-            continue
-        if _is_clear(pts, obstacles, safe):
-            return pts
-        tried.append(pts)
-    if not tried:
-        return [a, b]
-    return max(tried, key=lambda p: _min_dist(p, _near(p, obstacles, safe * 3)) if _near(p, obstacles, safe * 3) else 1e18)
+    chord = (-(b[1] - a[1]) / L, (b[0] - a[0]) / L)
+    na, nb = na or chord, nb or chord
+    trail_need = half + 4 * SS
+    exempt = half + 10 * SS
+    cell_need = R + 6 * SS
+    ks = sorted({half * m for m in (1.0, 1.4, 1.9, 2.5, 3.2, 4.2)} | {0.4 * L, 0.7 * L})
+
+    best, best_v = None, 0.0
+    for k in ks:                                              # от малого обхода к большому
+        steps = max(24, int((L + 3 * k) / (18 * SS)))
+        for sa, sb in ((1, 1), (-1, -1), (1, -1), (-1, 1)):   # с какой стороны тропы выйти и войти
+            c1 = (a[0] + na[0] * k * sa, a[1] + na[1] * k * sa)
+            c2 = (b[0] + nb[0] * k * sb, b[1] + nb[1] * k * sb)
+            pts = _cubic(a, c1, c2, b, steps)
+            if not all(box[0] <= x <= box[2] and box[1] <= y <= box[3] for x, y in pts):
+                continue
+            v = _intrusion(pts, a, b, trail, cells, trail_need, exempt, cell_need)
+            if v == 0:
+                return pts
+            if best is None or v < best_v:
+                best, best_v = pts, v
+    return best if best is not None else [a, b]
 
 def _trim(pts, a, b, s_off, e_off):
     """Обрезает ломаную у кругов ячеек a и b (точно, с интерполяцией)."""
@@ -471,8 +478,8 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     centers = {cid: center(cid) for cid in m.cells if drawable(cid)}
 
     # тропа и ландшафт (в режиме редактора с сеткой не рисуем)
+    samples = []
     if not show_grid:
-        samples = []
         main_pts = [centers[c] for c in path if c in centers]
         for chain_info in chains:
             bid, chain, exit_id = chain_info
@@ -482,6 +489,20 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         if len(main_pts) >= 2:
             samples += _draw_trail(img, main_pts, TRAIL_EDGE, TRAIL_SAND, R)
         _decorate(img, rng, samples, W, H, R)
+
+    # данные для обхода тропы стрелками прыжков
+    half = R + (TRAIL_EXTRA + 12) * SS / 2                    # полуширина тропы вместе с каймой
+    trail_pts = samples[::2]
+    off_route = [p for cid, p in centers.items() if cid not in index and cid not in side_label]
+    normals = {}                                              # нормаль к тропе в ячейках основного маршрута
+    for i, cid in enumerate(path):
+        p, q = centers.get(path[max(i - 1, 0)]), centers.get(path[min(i + 1, len(path) - 1)])
+        if p is None or q is None:
+            continue
+        tx, ty = q[0] - p[0], q[1] - p[1]
+        ln = math.hypot(tx, ty)
+        if ln:
+            normals[cid] = (-ty / ln, tx / ln)
 
     # подписи координат и пустые места сетки (только в редакторе)
     if show_grid:
@@ -496,14 +517,14 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
                 d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
                        font=label_font, fill=(125, 130, 140, 255))
 
-    # стрелки прыжков и откатов: сплошная линия, прямая или дуга, обходящая все остальные ячейки
+    # стрелки прыжков и откатов: идут снаружи тропы, у каждой тёмная обводка
     box = (3 * SS, 3 * SS, W - 3 * SS, H - 3 * SS)
-    safe = R + 6 * SS
     for cid, c in m.cells.items():
         if c.effect in ("jump", "back") and drawable(cid) and drawable(c.target):
-            obstacles = [p for k, p in centers.items() if k != cid and k != c.target]
-            pts = _route(centers[cid], centers[c.target], obstacles, box, safe)
-            pts = _trim(pts, centers[cid], centers[c.target], R + 3 * SS, R + 3 * SS)
+            a, b = centers[cid], centers[c.target]
+            pts = _route(a, b, normals.get(cid), normals.get(c.target), trail_pts, off_route, box, half, R)
+            pts = _trim(pts, a, b, R + 3 * SS, R + 3 * SS)
+            _poly_arrow(d, pts, (20, 22, 26, 230), 8 * SS, 15 * SS)
             _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (255,), 4 * SS, 12 * SS)
 
     # стрелки маршрута (внутри дороги — жёлтые)
@@ -520,7 +541,6 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
                    5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS, dashed=True)
 
     # ячейки
-    small, _ = _font(15 * SS)
     for cid, c in m.cells.items():
         if not drawable(cid):
             continue
@@ -540,19 +560,11 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         width = (6 if kind in ("start", "finish") else 4) * SS
         circle = (cx - R, cy - R, cx + R, cy + R)
         d.ellipse(circle, fill=fill + (a,), outline=ring + (a,), width=width)
-        if c.side:                                            # клетка дороги: полоски, затем снова кайма поверх них
+        if c.side:
             _stripes(img, cx, cy, R, a)
             d.ellipse(circle, outline=ring + (a,), width=width)
         if kind in ("start", "finish"):
             _icon(d, kind, cx, cy, fg + (a,))
-        if on and (kind is None or kind in EFFECT_COLORS):
-            label = str(index[cid]) if cid in index else side_label.get(cid)
-            if label:
-                bx, by = cx - R * 0.72, cy - R * 0.80
-                half = d.textlength(label, font=small) / 2 + 7 * SS
-                d.rounded_rectangle((bx - half, by - 13 * SS, bx + half, by + 13 * SS), radius=13 * SS,
-                                    fill=(28, 30, 34, 235), outline=(255, 255, 255, 255), width=2 * SS)
-                d.text((bx, by), label, font=small, fill=(255, 255, 255, 255), anchor="mm")
         if cid == selected:
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)
