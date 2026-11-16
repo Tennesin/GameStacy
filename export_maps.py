@@ -14,7 +14,7 @@ def main():
     OUT.mkdir(exist_ok=True)
     con = sqlite3.connect(DB)
     n = 0
-    for table, prefix in (("maps", "maps"), ("map_drafts", "drafts")):
+    for table, prefix in (("maps", "maps"),):
         for name, text in con.execute(f"SELECT name, json FROM {table} ORDER BY name"):
             n += 1
             safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_") or "map"

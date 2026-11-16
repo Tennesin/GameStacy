@@ -682,7 +682,7 @@ class MapEditor:
         remove_road(m, cid)                                          # старая дорога этой ячейки пересоздаётся
         cell.effect, cell.target = BRANCH, None
         self.pending = self.link_from = None
-        self.road = {"branch": cid, "before": before, "dirty": self.dirty}
+        self.road = {"branch": cid, "before": before, "dirty": self.dirty, "cells": []}
         self.selected = cid
         self.msg(f"Особый путь от {cid}: кликайте по пустым клеткам (дорога по порядку), "
                  "затем по ячейке основного маршрута (выход). Esc - отмена.")

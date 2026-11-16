@@ -25,7 +25,6 @@ from .render import BOT_NAMES, make_tokens, render_board_async
 from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
                     MIN_PLAYERS, MINI_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
 from .storage import Storage
-from .editor import EditorController
 from .validator import validate_map
 from .views import ConfirmLeaveView, LobbyView, PlayView
 
@@ -820,16 +819,9 @@ JMAP_USAGE = ("Использование:\n"
               "  -jmap list                   список готовых карт\n"
               "  -jmap import ПУТЬ_К_JSON     проверить карту и добавить в список для игроков\n"
               "                               (путь в кавычках или с прямыми слэшами)\n"
-              "  -jmap delete ID_карты        удалить готовую карту из списка\n"
-              "  -jmap edit ID_канала [--gameid ID_канала] [название]\n"
-              "                               открыть редактор карты в канале или ветке\n"
-              "  -jmap drafts                 список черновиков редактора\n"
-              "  -jmap draftdel НАЗВАНИЕ      удалить черновик (название в кавычках, если есть пробелы)\n"
-              "  -jmap draftdel --all         удалить все черновики, кроме открытых в редакторе\n"
-              "  -jmap sessions               открытые редакторы\n"
-              "  -jmap close ID_сессии        закрыть редактор")
+              "  -jmap delete ID_карты        удалить готовую карту из списка")
 
-def _console_jmap(ctrl: JumanjiController, editor: EditorController):
+def _console_jmap(ctrl: JumanjiController):
     async def handler(bot, args: list):
         if not args:
             print(JMAP_USAGE, flush=True)
@@ -854,39 +846,6 @@ def _console_jmap(ctrl: JumanjiController, editor: EditorController):
                 print(f"✔ Карта «{gmap.name}» добавлена (ID {map_id}).", flush=True)
         elif sub == "delete" and len(args) >= 2 and args[1].isdigit():
             print("✔ Удалена." if ctrl.db.delete_map(int(args[1])) else "⚠ Такой карты нет.", flush=True)
-        elif sub == "edit":
-            await editor.console_edit(bot, args[1:])
-        elif sub == "drafts":
-            rows = ctrl.db.list_drafts()
-            for r in rows:
-                print(f"  {r['name']}  (изменён {str(r['updated_utc'])[:16]})", flush=True)
-            print(f"Черновиков: {len(rows)}", flush=True)
-        elif sub == "draftdel" and len(args) >= 2:
-            busy = {s["map_name"].casefold() for s in ctrl.db.editors()}   # черновики, открытые в редакторе
-            if args[1] == "--all":
-                done = skipped = 0
-                for r in ctrl.db.list_drafts():
-                    if r["name"].casefold() in busy:
-                        skipped += 1
-                        continue
-                    ctrl.db.delete_draft(r["name"])
-                    done += 1
-                msg = f"✔ Удалено черновиков: {done}"
-                if skipped:
-                    msg += f"; пропущено (открыты в редакторе): {skipped}"
-                print(msg, flush=True)
-            else:
-                name = " ".join(args[1:]).strip('"')
-                if name.casefold() in busy:
-                    print("⚠ Этот черновик открыт в редакторе. Сначала закройте сессию: "
-                          "-jmap sessions, затем -jmap close ID_сессии.", flush=True)
-                else:
-                    print("✔ Удалён." if ctrl.db.delete_draft(name) else "⚠ Такого черновика нет.",
-                          flush=True)
-        elif sub == "sessions":
-            editor.console_sessions()
-        elif sub == "close" and len(args) >= 2 and args[1].isdigit():
-            await editor.console_close(int(args[1]))
         else:
             print(JMAP_USAGE, flush=True)
     return handler
@@ -897,10 +856,8 @@ def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = JumanjiController(bot, Storage(bot.clock))
     ctrl.restore_views()
-    editor = EditorController(bot, ctrl.db)
-    editor.restore_views()
     bot.full_games["jumanji"] = FullGame("jumanji", "Джуманджи", ctrl.launch)
-    bot.console_commands["-jmap"] = _console_jmap(ctrl, editor)
+    bot.console_commands["-jmap"] = _console_jmap(ctrl)
 
     @app_commands.command(name="jumanji", description="Джуманджи: открыть набор на партию")
     @app_commands.guild_only()

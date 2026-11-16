@@ -79,8 +79,6 @@ def test_storage():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         st = Storage(FakeClock(), Path(tmp) / "j.db")
         try:
-            st.save_draft("Test", good.to_json())
-            assert st.get_draft("TEST") is not None
             mid = st.export_map("Test", good.to_json())
             assert st.export_map("TEST", good.to_json()) == mid
             assert [r["name"] for r in st.list_maps()] == ["Test"]

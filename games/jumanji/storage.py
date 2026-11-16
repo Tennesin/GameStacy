@@ -76,7 +76,6 @@ MIGRATIONS = [
 
 _GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "host_id", "status", "solo", "bots", "map_id",
                 "map_name", "map_json", "state_json", "turn_deadline_utc", "result"}
-_EDITOR_FIELDS = {"message_id", "map_name", "selected", "tail", "panel", "jitter_seed"}
 
 class Storage:
     def __init__(self, clock, path: Optional[Path] = None):
@@ -85,25 +84,6 @@ class Storage:
 
     def _now(self) -> str:
         return self.clock.now().isoformat()
-
-    # ---------- Карты: черновики ----------
-
-    def save_draft(self, name: str, text: str):
-        with self.con:
-            self.con.execute(
-                "INSERT INTO map_drafts VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
-                "json=excluded.json, updated_utc=excluded.updated_utc", (name.strip(), text, self._now()))
-
-    def get_draft(self, name: str):
-        return self.con.execute("SELECT * FROM map_drafts WHERE name=?", (name.strip(),)).fetchone()
-
-    def list_drafts(self) -> list:
-        return self.con.execute("SELECT name, updated_utc FROM map_drafts ORDER BY name").fetchall()
-
-    def delete_draft(self, name: str) -> bool:
-        with self.con:
-            cur = self.con.execute("DELETE FROM map_drafts WHERE name=?", (name.strip(),))
-        return cur.rowcount > 0
 
     # ---------- Карты: экспортированные ----------
 
@@ -129,43 +109,6 @@ class Storage:
         with self.con:
             cur = self.con.execute("DELETE FROM maps WHERE map_id=?", (map_id,))
         return cur.rowcount > 0
-
-    # ---------- Редактор карт ----------
-
-    def create_editor(self, guild_id: int, channel_id: int, home_id, owner_id: int,
-                      map_name: str, tail=None) -> int:
-        with self.con:
-            cur = self.con.execute(
-                "INSERT INTO editor_sessions (guild_id, channel_id, home_channel_id, owner_id, "
-                "map_name, tail, updated_utc) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, channel_id, home_id, owner_id, map_name, tail, self._now()))
-        return cur.lastrowid
-
-    def get_editor(self, session_id: int):
-        return self.con.execute("SELECT * FROM editor_sessions WHERE session_id=?",
-                                (session_id,)).fetchone()
-
-    def editors(self) -> list:
-        return self.con.execute("SELECT * FROM editor_sessions ORDER BY session_id").fetchall()
-
-    def update_editor(self, session_id: int, **fields):
-        bad = set(fields) - _EDITOR_FIELDS
-        if bad:
-            raise ValueError(f"Неизвестные поля сессии: {sorted(bad)}")
-        cols = ", ".join(f"{k}=?" for k in fields)
-        with self.con:
-            self.con.execute(f"UPDATE editor_sessions SET {cols}, updated_utc=? WHERE session_id=?",
-                             (*fields.values(), self._now(), session_id))
-
-    def close_editor(self, session_id: int):
-        with self.con:
-            self.con.execute("DELETE FROM editor_sessions WHERE session_id=?", (session_id,))
-
-    def rename_draft(self, old: str, new: str, text: str):
-        """Переименовывает черновик (в том числе смена только регистра букв)."""
-        with self.con:
-            self.con.execute("UPDATE map_drafts SET name=?, json=?, updated_utc=? WHERE name=?",
-                             (new.strip(), text, self._now(), old.strip()))
 
     # ---------- Партии ----------
 
