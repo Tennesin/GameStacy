@@ -1,5 +1,6 @@
 """Табло Джуманджи: картинка карты с фишками игроков (Pillow)."""
 import random
+from collections import OrderedDict
 import zlib
 from PIL import ImageOps
 import asyncio
@@ -444,8 +445,12 @@ def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
             d.ellipse((x - r, y - r * 0.7, x + r, y + r * 0.7), fill=(120, 124, 128, 255))
             d.ellipse((x - r * 0.6, y - r * 0.55, x + r * 0.1, y - r * 0.05), fill=(160, 164, 168, 255))
 
-def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
-    """PNG-табло. tokens — фишки (make_tokens)."""
+# Кэш статичной основы карты: фон, тропа, декор, стрелки, ячейки.
+_BASE_CACHE: OrderedDict = OrderedDict()
+_BASE_CACHE_LIMIT = 2
+
+def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
+    """Тяжёлая часть: рисует всё, кроме фишек. Возвращает (картинка в SS-размере, центры ячеек, список клеток по индексам)."""
     path, _problem = trace_path(m)
     index = {cid: i for i, cid in enumerate(path)}
     chains, _bad = side_chains(m, path)
@@ -569,6 +574,27 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)
 
+    return img, centers, full
+
+def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
+    """PNG-табло. tokens — фишки (make_tokens). Статичная основа берётся из кэша."""
+    cacheable = selected is None                              # с выделенной ячейкой (редактор) кэш не нужен
+    key = (zlib.crc32(m.to_json().encode("utf-8")), show_grid)
+    base = _BASE_CACHE.get(key) if cacheable else None
+    if base is None:
+        base = _build_base(m, selected, show_grid)
+        if cacheable:
+            _BASE_CACHE[key] = base
+            while len(_BASE_CACHE) > _BASE_CACHE_LIMIT:
+                _BASE_CACHE.popitem(last=False)
+    else:
+        _BASE_CACHE.move_to_end(key)
+
+    base_img, centers, full = base
+    img = base_img.copy()                                     # основу не портим: в кэше она должна остаться чистой
+    d = ImageDraw.Draw(img, "RGBA")
+    W, H = img.size
+
     # фишки: на одной ячейке несколько — все, кроме ходящего, затемнены
     groups: dict = {}
     for t in tokens:
@@ -598,7 +624,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         tw, th = max(1, int(tw * k)), max(1, int(th * k))
     out = img.resize((tw, th), RESAMPLE).convert("RGB")
     buf = io.BytesIO()
-    out.save(buf, "PNG")
+    out.save(buf, "PNG", compress_level=3)                    # быстрее сжатие: на слабом процессоре это заметно
     return buf.getvalue()
 
 _lock: Optional[asyncio.Semaphore] = None

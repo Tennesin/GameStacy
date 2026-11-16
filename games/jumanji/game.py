@@ -399,18 +399,27 @@ class JumanjiController:
 
     # ==================== Идущая партия: действия игроков ====================
 
+    @staticmethod
+    async def _reply(interaction: discord.Interaction, text: str):
+        """Скрытый ответ игроку: работает и до, и после defer()."""
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+
     async def _playing(self, interaction: discord.Interaction, game_id: int):
         """(Runtime, строка БД) или None, если партия закрыта / взаимодействие вне зоны игры."""
         rt = self.rt.get(game_id)
         g = self.db.get(game_id)
         if rt is None or g is None or g["status"] != "playing":
-            await interaction.response.send_message("Партия уже завершена.", ephemeral=True)
+            await self._reply(interaction, "Партия уже завершена.")
             return None
         if not await self._guard(interaction, g):
             return None
         return rt, g
 
     async def roll(self, interaction: discord.Interaction, game_id: int):
+        await interaction.response.defer()
         async with self.locks[game_id]:
             got = await self._playing(interaction, game_id)
             if got is None:
@@ -419,21 +428,21 @@ class JumanjiController:
             m, uid = rt.match, interaction.user.id
             p = m.get(uid)
             if m.awaiting_minigame:
-                await interaction.response.send_message("Сейчас идёт мини-игра.", ephemeral=True)
+                await self._reply(interaction, "Сейчас идёт мини-игра.")
             elif p is None:
-                await interaction.response.send_message("Вы не участвуете в этой партии.", ephemeral=True)
+                await self._reply(interaction, "Вы не участвуете в этой партии.")
             elif p.left:
-                await interaction.response.send_message("Вы вышли из этой партии.", ephemeral=True)
+                await self._reply(interaction, "Вы вышли из этой партии.")
             elif p.finished:
-                await interaction.response.send_message("Вы уже дошли до финиша.", ephemeral=True)
+                await self._reply(interaction, "Вы уже дошли до финиша.")
             elif m.current_player.pid != uid:
-                await interaction.response.send_message(
-                    f"Сейчас не ваш ход: ходит {self._label(rt, m.current_player.pid)}.", ephemeral=True)
+                await self._reply(
+                    interaction, f"Сейчас не ваш ход: ходит {self._label(rt, m.current_player.pid)}.")
             else:
-                await interaction.response.defer()
                 await self._after(rt, m.roll())
 
     async def play_join(self, interaction: discord.Interaction, game_id: int):
+        await interaction.response.defer()
         async with self.locks[game_id]:
             got = await self._playing(interaction, game_id)
             if got is None:
@@ -441,17 +450,15 @@ class JumanjiController:
             rt = got[0]
             m, user = rt.match, interaction.user
             if rt.solo:
-                await interaction.response.send_message(
-                    "Это одиночная партия: присоединиться нельзя.", ephemeral=True)
+                await self._reply(interaction, "Это одиночная партия: присоединиться нельзя.")
                 return
             if m.awaiting_minigame:
-                await interaction.response.send_message("Дождитесь конца мини-игры.", ephemeral=True)
+                await self._reply(interaction, "Дождитесь конца мини-игры.")
                 return
             ok, why = m.can_join(user.id)
             if not ok:
-                await interaction.response.send_message(why, ephemeral=True)
+                await self._reply(interaction, why)
                 return
-            await interaction.response.defer()
             url = avatar_url(user)
             events = m.join(user.id, user.display_name)
             rt.names[user.id], rt.avatars[user.id] = user.display_name, url
@@ -475,18 +482,18 @@ class JumanjiController:
         view.origin = interaction
 
     async def play_leave_confirm(self, interaction: discord.Interaction, game_id: int):
-        """Нажата «Да» в окне подтверждения: реальный выход из партии.
-        Табло обновляется через канал (_after), а скрытое окно закрываем ответом на это нажатие."""
+        """Нажата «Да» в окне подтверждения: реальный выход из партии."""
+        await interaction.response.defer()
         async with self.locks[game_id]:
             rt, g = self.rt.get(game_id), self.db.get(game_id)
             if rt is None or g is None or g["status"] != "playing":
-                await interaction.response.edit_message(content="Партия уже завершена.", view=None)
+                await interaction.edit_original_response(content="Партия уже завершена.", view=None)
                 return
             p = rt.match.get(interaction.user.id)
             if p is None or not p.on_map:
-                await interaction.response.edit_message(content="Вы уже не участвуете в игре.", view=None)
+                await interaction.edit_original_response(content="Вы уже не участвуете в игре.", view=None)
                 return
-            await interaction.response.edit_message(content="🚪 Вы вышли из партии.", view=None)
+            await interaction.edit_original_response(content="🚪 Вы вышли из партии.", view=None)
             events = rt.match.leave(p.pid)
             await self._after(rt, events, rearm=any(e.kind == "turn" for e in events))
 
