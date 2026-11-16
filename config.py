@@ -29,7 +29,10 @@ CLOCK_SYNC_SECONDS = 300   # сверка с Discord раз в 5 минут
 MINI_ROLL_DELAY = 3        # пауза перед каждым броском кубика, сек
 MINI_PICK_SECONDS = 30     # сколько длится приём выборов, сек
 LOBBY_TIMEOUT_SECONDS = 100
-
+# Подъём сообщения игры вниз канала
+BUMP_ENABLED = True        # False — функция выключена
+BUMP_AFTER_MESSAGES = 3    # сколько чужих сообщений под табло вызывают переотправку
+BUMP_LOOKAHEAD = 20        # сколько сообщений под табло просматривать (свои тоже попадают в выборку)
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
 GAMES = ["games.mini_games", "games.x_o", "games.jumanji"]   # мини-игры подключаются первыми
 

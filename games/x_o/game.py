@@ -8,12 +8,14 @@ import discord
 from discord import app_commands
 
 from config import LOBBY_TIMEOUT_SECONDS
+from core.bump import should_bump
 from core.errors import report_error
 from .logic import MARKS, find_win, is_full
 from .storage import Storage
 from .views import BoardView, LobbyView
 
 log = logging.getLogger("stacy.xo")
+NO_PINGS = discord.AllowedMentions.none()
 
 def mention(uid) -> str:
     return f"<@{uid}>"
@@ -86,6 +88,47 @@ class XOController:
                 view = BoardView(self, g["game_id"], g["board"], locked=True, rematch=True)
             self.bot.add_view(view, message_id=g["message_id"])
 
+    # ---------- Показ сообщения партии (правка или подъём вниз канала) ----------
+
+    def _default_view(self, g):
+        """Кнопки по состоянию партии (нужны, когда сообщение приходится отправлять заново)."""
+        gid = g["game_id"]
+        if g["status"] == "lobby":
+            view = LobbyView(self, gid)
+            self.lobby_views[gid] = view
+            return view
+        if g["status"] == "playing":
+            return BoardView(self, gid, g["board"])
+        return BoardView(self, gid, g["board"], locked=True, rematch=g["rematch"] == 1)
+
+    async def _resend(self, g, content: str, view) -> bool:
+        """Новое сообщение внизу канала, потом удаление старого. True — получилось."""
+        chan = self.bot.get_partial_messageable(g["channel_id"])
+        try:
+            new = await chan.send(content, view=view, allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            log.exception("Не удалось поднять сообщение партии #%s", g["game_id"])
+            return False
+        old = g["message_id"]
+        self.db.set_message(g["game_id"], new.id)
+        try:
+            await chan.get_partial_message(old).delete()
+        except discord.HTTPException:
+            pass
+        return True
+
+    async def _show(self, interaction: discord.Interaction, game_id: int, view=None, note: str = ""):
+        """Единая точка обновления сообщения партии после нажатия кнопки."""
+        g = self.db.get(game_id)
+        content = render(g, note)
+        await interaction.response.defer()                       # подтверждение нажатия, 3 секунды не жмут
+
+        if g["message_id"] and await should_bump(self.bot, g["channel_id"], g["message_id"]):
+            if await self._resend(g, content, view if view is not None else self._default_view(g)):
+                return
+        kw = {"view": view} if view is not None else {}
+        await interaction.edit_original_response(content=content, **kw)
+
     # ---------- Таймер набора ----------
 
     def _schedule_expiry(self, game_id: int, delay: float):
@@ -140,7 +183,7 @@ class XOController:
                 return False
             if g["player_x"] is None:
                 self.db.join_first(game_id, uid)
-                await interaction.response.edit_message(content=render(self.db.get(game_id)))
+                await self._show(interaction, game_id)
                 return False
 
             # Второй игрок найден: бросок монеты решает, кто X
@@ -150,9 +193,7 @@ class XOController:
             self.db.start(game_id, first, second)
             self._cancel_timer(game_id)                 # набор завершён: таймер больше не нужен
             self.lobby_views.pop(game_id, None)
-            await interaction.response.edit_message(
-                content=render(self.db.get(game_id), "🪙 Монета брошена!"),
-                view=BoardView(self, game_id))
+            await self._show(interaction, game_id, BoardView(self, game_id), "🪙 Монета брошена!")
             return True
 
     # ---------- Ход ----------
@@ -188,7 +229,7 @@ class XOController:
             self.db.make_move(game_id, uid, cell, board, turn, status, result)
             finished = status == "finished"
             view = BoardView(self, game_id, board, locked=finished, rematch=finished)
-            await interaction.response.edit_message(content=render(self.db.get(game_id)), view=view)
+            await self._show(interaction, game_id, view)
 
     # ---------- Реванш ----------
 
@@ -219,9 +260,8 @@ class XOController:
             self.db.vote_rematch(game_id, seat)
             g = self.db.get(game_id)
             if not (g["ready_x"] and g["ready_o"]):
-                await interaction.response.edit_message(
-                    content=render(g),
-                    view=BoardView(self, game_id, g["board"], locked=True, rematch=True))
+                await self._show(interaction, game_id,
+                                 BoardView(self, game_id, g["board"], locked=True, rematch=True))
                 return False
 
             # Согласны оба: новая партия, монета решает, кто X
@@ -229,9 +269,8 @@ class XOController:
             if random.random() < 0.5:
                 first, second = second, first
             new_id = self.db.restart(game_id, first, second)
-            await interaction.response.edit_message(
-                content=render(self.db.get(new_id), "🔁 Реванш! 🪙 Монета брошена заново!"),
-                view=BoardView(self, new_id))
+            await self._show(interaction, new_id, BoardView(self, new_id),
+                             "🔁 Реванш! 🪙 Монета брошена заново!")
             return True
 
     async def rematch_decline(self, interaction: discord.Interaction, game_id: int) -> bool:
@@ -248,9 +287,8 @@ class XOController:
             self.db.set_rematch(game_id, 2)
             note = (f"🚫 {mention(interaction.user.id)} отказался(лась) от реванша. "
                     "Для новой партии используйте /xo.")
-            await interaction.response.edit_message(
-                content=render(self.db.get(game_id), note),
-                view=BoardView(self, game_id, g["board"], locked=True))
+            await self._show(interaction, game_id,
+                             BoardView(self, game_id, g["board"], locked=True), note)
             return True
 
     # ---------- Ошибки ----------

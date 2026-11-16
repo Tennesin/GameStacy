@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 
 from config import DEV_ID
+from core.bump import should_bump
 from core.errors import TECH_ERROR_TEXT, report_error
 from core.full_games import FullGame
 from core.scope import ignore, in_scope
@@ -180,8 +181,27 @@ class JumanjiController:
 
     async def _lobby_refresh(self, interaction: discord.Interaction, game_id: int):
         g = self.db.get(game_id)
-        await interaction.response.edit_message(content=self._lobby_text(g), view=self._lobby_view(g),
-                                                allowed_mentions=NO_PINGS)
+        content, view = self._lobby_text(g), self._lobby_view(g)
+
+        if g["message_id"] and await should_bump(self.bot, g["channel_id"], g["message_id"]):
+            await interaction.response.defer()               # подтверждаем нажатие, дальше шлём новое сообщение
+            chan = self.bot.get_partial_messageable(g["channel_id"])
+            try:
+                new = await chan.send(content, view=view, allowed_mentions=NO_PINGS)
+            except discord.HTTPException:
+                log.exception("Не удалось поднять лобби #%s, правлю старое", game_id)
+                await interaction.edit_original_response(content=content, view=view,
+                                                         allowed_mentions=NO_PINGS)
+            else:
+                old = g["message_id"]
+                self.db.set_message(game_id, new.id)
+                try:
+                    await chan.get_partial_message(old).delete()
+                except discord.HTTPException:
+                    pass
+        else:
+            await interaction.response.edit_message(content=content, view=view, allowed_mentions=NO_PINGS)
+
         self._schedule_expiry(game_id, LOBBY_SECONDS)
 
     async def _guard(self, interaction: discord.Interaction, g) -> bool:
@@ -473,6 +493,8 @@ class JumanjiController:
         """После любого изменения партии (вызывать под блокировкой): лог, таймер, сохранение, табло, пинг хода."""
         self._log(rt, events)
         m = rt.match
+        if not bump:                                    # после мини-игры bump уже True; иначе смотрим на канал
+            bump = await should_bump(self.bot, rt.channel_id, rt.message_id)
         if m.over:
             self._cancel(rt)
             rt.deadline = None
