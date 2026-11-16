@@ -32,6 +32,8 @@ log = logging.getLogger("stacy.jumanji")
 
 NO_PINGS = discord.AllowedMentions.none()
 MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+HUMAN_EMOJI = ["🔵", "🟢", "🟡", "🔴", "🟠"]       # порядок как у HUMAN_COLORS в render.py
+BOT_EMOJI = ["🟣", "🩷", "🩵", "🟤"]               # порядок как у BOT_COLORS
 RULES_TEXT = ("**Правила.** Бросайте кубик по очереди (на ход 30 секунд) и идите к финишу. "
               "Если до финиша осталось меньше, чем выпало, вы остаётесь на месте: финиш берётся точным броском.\n"
               "Цветные клетки: 🟢 прыжок вперёд, 🔴 откат, 🟠 пропуск хода, 🔵 ещё бросок, "
@@ -644,8 +646,9 @@ class JumanjiController:
 
     def _label(self, rt: Runtime, pid: int) -> str:
         if pid in BOT_IDS:
-            return f"🤖 {bot_name(pid)}"
-        return esc(rt.names.get(pid, pid))
+            return f"{BOT_EMOJI[BOT_IDS.index(pid)]} {bot_name(pid)}"
+        seat = next((i for i, p in enumerate(rt.match.players) if p.pid == pid), 0)
+        return f"{HUMAN_EMOJI[seat % len(HUMAN_EMOJI)]} {esc(rt.names.get(pid, pid))}"
 
     def _describe(self, rt: Runtime, ev) -> Optional[str]:
         k, d = ev.kind, ev.data

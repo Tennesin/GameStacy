@@ -1,6 +1,7 @@
-"""Табло Джуманджи: картинка карты с фишками игроков (Pillow).
-Про Discord и БД ничего не знает: на входе карта и список фишек, на выходе PNG в байтах.
-Рисуется в двойном размере и уменьшается: так края гладкие."""
+"""Табло Джуманджи: картинка карты с фишками игроков (Pillow)."""
+import random
+import zlib
+from PIL import ImageOps
 import asyncio
 import io
 import math
@@ -14,6 +15,7 @@ from .models import GameMap, parse_cell_id, side_chains, trace_path
 from .rules import BOT_IDS
 
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
+BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 
 # ---------- Размеры (логические пиксели; реально рисуется в SS раз крупнее) ----------
 SS = 2
@@ -31,19 +33,23 @@ EFFECT_COLORS = {
     "branch": (250, 204, 21),
 }
 STRIPE = (250, 204, 21)              # диагональные полоски на клетках особого пути
-SIDE_LINK = (214, 170, 40, 255)      # стрелки внутри дороги
+SIDE_LINK = (150, 110, 20, 255)
 FINISH_FILL = (240, 240, 240)
 START_RING = (80, 200, 220)
 FINISH_RING = (255, 196, 40)
-LINK_ON = (140, 146, 156, 255)       # стрелки маршрута
+LINK_ON = (70, 52, 34, 255)
 LINK_OFF = (85, 89, 97, 255)         # стрелки у ячеек вне маршрута
 ORPHAN_ALPHA = 90
 GOLD = (255, 214, 64, 255)
+GRASS_DARK, GRASS_LIGHT = (46, 78, 52), (82, 118, 72)
+TRAIL_EDGE, TRAIL_SAND = (88, 66, 44), (198, 172, 122)
+SIDE_EDGE, SIDE_SAND = (122, 92, 28), (232, 200, 112)
+TRAIL_EXTRA = 28          # на сколько тропа шире круга ячейки (логические px)
 
 BOT_COLORS = [(155, 89, 182), (233, 30, 140), (26, 188, 156), (141, 110, 99)]
 BOT_COLOR_NAMES = ["фиолетовый", "розовый", "бирюзовый", "коричневый"]
 BOT_NAMES = ["Фиолетовый бот", "Розовый бот", "Бирюзовый бот", "Коричневый бот"]
-HUMAN_COLORS = [(88, 101, 242), (87, 242, 135), (254, 231, 92), (235, 69, 158), (237, 66, 69), (52, 152, 219)]
+HUMAN_COLORS = [(66, 133, 244), (59, 200, 100), (250, 210, 50), (235, 60, 60), (245, 140, 40)]
 
 DIM_RGB, DIM_ALPHA = 0.45, 0.5       # затемнение фишек, которые делят ячейку с ходящим
 
@@ -85,13 +91,13 @@ def make_tokens(match, avatars: dict) -> list:
     """Фишки по состоянию партии. avatars: {pid: байты}. На карте остаются только играющие."""
     cur = None if match.over else match.current_player.pid
     out = []
-    for p in match.players:
+    for seat, p in enumerate(match.players):
         if not p.on_map:
             continue
         if p.is_bot:
             color = BOT_IDS.index(p.pid) if p.pid in BOT_IDS else 0
         else:
-            color = abs(p.pid) % len(HUMAN_COLORS)
+            color = seat % len(HUMAN_COLORS)
         letter = (p.name.strip()[:1] or "?").upper()
         out.append(Token(p.pid, p.pos, p.is_bot, color, avatars.get(p.pid), p.pid == cur, letter))
     return out
@@ -99,7 +105,7 @@ def make_tokens(match, avatars: dict) -> list:
 def _slots(n: int) -> list:
     """Места фишек внутри ячейки: (смещение x, смещение y, диаметр)."""
     if n == 1:
-        return [(0, 0, 58)]
+        return [(16, 16, 46)]
     if n == 2:
         return [(-18, 0, 40), (18, 0, 40)]
     ring, dia = {3: (20, 34), 4: (24, 32)}.get(n, (25, 28))
@@ -113,8 +119,11 @@ def _circle_mask(d: int):
     return big.resize((d, d), RESAMPLE)
 
 def _tile(tok: Token, dia: int, dim: bool):
-    """Готовая круглая фишка с обводкой (RGBA)."""
+    """Готовая круглая фишка с цветной обводкой (RGBA)."""
     d = int(dia * SS)
+    palette = BOT_COLORS if tok.is_bot else HUMAN_COLORS
+    ring_rgb = palette[tok.color % len(palette)]
+
     face, plain = None, False
     if tok.avatar and not tok.is_bot:
         try:
@@ -122,10 +131,11 @@ def _tile(tok: Token, dia: int, dim: bool):
         except Exception:
             face = None
     if face is None:
-        palette = BOT_COLORS if tok.is_bot else HUMAN_COLORS
-        face = Image.new("RGBA", (d, d), palette[tok.color % len(palette)] + (255,))
+        face = Image.new("RGBA", (d, d), ring_rgb + (255,))
         plain = True
-    face.putalpha(_circle_mask(d))
+
+    face.putalpha(_circle_mask(d))          # изменяет face на месте и возвращает None: присваивать результат нельзя
+
     if plain and not tok.is_bot and tok.letter:               # у ботов буквы нет: «обычные кружки»
         font, cyr = _font(int(d * 0.5))
         if cyr or tok.letter.isascii():
@@ -134,9 +144,10 @@ def _tile(tok: Token, dia: int, dim: bool):
                                           fill=(255, 255, 255, 255), anchor="mm")
             except Exception:
                 pass
-    width = (4 if tok.current else 2) * SS
-    ImageDraw.Draw(face).ellipse((0, 0, d - 1, d - 1),
-                                 outline=GOLD if tok.current else (255, 255, 255, 255), width=width)
+
+    width = (7 if tok.current else 5) * SS
+    ImageDraw.Draw(face).ellipse((0, 0, d - 1, d - 1), outline=ring_rgb + (255,), width=width)
+
     if dim:
         r, g, b, a = face.split()
         rgb = [int(i * DIM_RGB) for i in range(256)]
@@ -341,6 +352,91 @@ def _bounds(m: GameMap, show_grid: bool) -> tuple:
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     return min(xs), min(ys), max(xs), max(ys)
 
+# ---------- Ландшафт и тропа ----------
+
+def _noise(w: int, h: int, cell: int, rng: random.Random):
+    """Гладкий шум: маленькая случайная картинка, растянутая BICUBIC."""
+    sw, sh = max(2, w // cell + 2), max(2, h // cell + 2)
+    small = Image.new("L", (sw, sh))
+    small.putdata([rng.randrange(256) for _ in range(sw * sh)])
+    return small.resize((w, h), BICUBIC)
+
+def _terrain(W: int, H: int, rng: random.Random):
+    """Травяной фон. Считается в логическом размере, потом растягивается до SS."""
+    w, h = max(2, W // SS), max(2, H // SS)
+    mix = ImageChops.blend(_noise(w, h, 110, rng), _noise(w, h, 30, rng), 0.35)
+    tex = ImageOps.colorize(ImageOps.autocontrast(mix), GRASS_DARK, GRASS_LIGHT)
+    return tex.resize((W, H), RESAMPLE).convert("RGBA")
+
+def _spline(pts, per: int = 8):
+    """Плавная кривая Catmull-Rom строго через заданные точки."""
+    if len(pts) < 3:
+        return list(pts)
+    p = [pts[0]] + list(pts) + [pts[-1]]
+    out = []
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i - 1], p[i], p[i + 1], p[i + 2]
+        for k in range(per):
+            t = k / per
+            t2, t3 = t * t, t * t * t
+            out.append(tuple(
+                0.5 * (2 * p1[j] + (-p0[j] + p2[j]) * t
+                       + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2
+                       + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t3)
+                for j in (0, 1)))
+    out.append(tuple(pts[-1]))
+    return out
+
+def _draw_trail(img, pts, edge, sand, R: int):
+    """Тропа: тёмная кайма и светлая середина. Возвращает точки кривой."""
+    d = ImageDraw.Draw(img, "RGBA")
+    curve = _spline(pts)
+    for color, width in ((edge, 2 * R + (TRAIL_EXTRA + 12) * SS), (sand, 2 * R + TRAIL_EXTRA * SS)):
+        d.line(curve, fill=color + (255,), width=int(width), joint="curve")
+        r = width / 2
+        for x, y in (curve[0], curve[-1]):                    # круглые концы
+            d.ellipse((x - r, y - r, x + r, y + r), fill=color + (255,))
+    return curve
+
+def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
+    """Деревья, кусты, камни и пруды. Не ближе безопасного расстояния к тропе."""
+    d = ImageDraw.Draw(img, "RGBA")
+    clear = R + (TRAIL_EXTRA // 2 + 26) * SS
+    step = 64 * SS
+    pts = samples[::2]
+    ponds, items = [], []
+    for gy in range(0, H, step):
+        for gx in range(0, W, step):
+            x = gx + rng.uniform(0.1, 0.9) * step             # все случайные числа берём ДО проверок:
+            y = gy + rng.uniform(0.1, 0.9) * step             # тогда декор не «прыгает» при правке карты
+            kind, size = rng.random(), rng.random()
+            need = clear + (70 * SS if kind > 0.97 else 0)
+            need2 = need * need
+            if any((x - px) ** 2 + (y - py) ** 2 < need2 for px, py in pts):
+                continue
+            (ponds if kind > 0.97 else items).append((y, x, kind, size))
+
+    for y, x, _k, s in ponds[:3]:
+        rw, rh = (40 + 30 * s) * SS, (26 + 16 * s) * SS
+        d.ellipse((x - rw - 7 * SS, y - rh - 7 * SS, x + rw + 7 * SS, y + rh + 7 * SS), fill=(176, 160, 110, 255))
+        d.ellipse((x - rw, y - rh, x + rw, y + rh), fill=(62, 120, 168, 255))
+        d.ellipse((x - rw * 0.6, y - rh * 0.65, x + rw * 0.25, y - rh * 0.05), fill=(94, 152, 198, 255))
+
+    for y, x, kind, s in sorted(items):                       # дальние выше, ближние рисуются поверх
+        if kind < 0.55:                                       # дерево
+            r = (18 + 12 * s) * SS
+            d.ellipse((x - r * 0.9, y + r * 0.35, x + r * 1.1, y + r * 0.95), fill=(0, 0, 0, 55))
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(30, 66, 38, 255))
+            d.ellipse((x - r * 0.7, y - r * 0.85, x + r * 0.4, y - r * 0.1), fill=(56, 102, 56, 255))
+        elif kind < 0.8:                                      # куст
+            r = (10 + 7 * s) * SS
+            d.ellipse((x - r, y - r * 0.8, x + r, y + r * 0.8), fill=(48, 94, 52, 255))
+            d.ellipse((x - r * 0.6, y - r * 0.7, x + r * 0.2, y), fill=(76, 124, 70, 255))
+        else:                                                 # камень
+            r = (8 + 6 * s) * SS
+            d.ellipse((x - r, y - r * 0.7, x + r, y + r * 0.7), fill=(120, 124, 128, 255))
+            d.ellipse((x - r * 0.6, y - r * 0.55, x + r * 0.1, y - r * 0.05), fill=(160, 164, 168, 255))
+
 def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
     """PNG-табло. tokens — фишки (make_tokens)."""
     path, _problem = trace_path(m)
@@ -358,7 +454,8 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     pad = PAD + math.ceil(shift * CELL)                       # поля растут, чтобы сдвинутые ячейки не обрезались
     W = ((x1 - x0 + 1) * CELL + 2 * pad) * SS
     H = ((y1 - y0 + 1) * CELL + 2 * pad) * SS
-    img = Image.new("RGBA", (W, H), BG)
+    rng = random.Random(zlib.crc32(m.name.encode("utf-8")))
+    img = Image.new("RGBA", (W, H), BG) if show_grid else _terrain(W, H, rng)
     d = ImageDraw.Draw(img, "RGBA")
     R = RADIUS * SS
 
@@ -372,6 +469,19 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         return bool(cid) and cid in m.cells and parse_cell_id(cid) is not None
 
     centers = {cid: center(cid) for cid in m.cells if drawable(cid)}
+
+    # тропа и ландшафт (в режиме редактора с сеткой не рисуем)
+    if not show_grid:
+        samples = []
+        main_pts = [centers[c] for c in path if c in centers]
+        for chain_info in chains:
+            bid, chain, exit_id = chain_info
+            ids = [bid, *chain] + ([exit_id] if exit_id else [])
+            if all(c in centers for c in ids) and len(ids) >= 2:
+                samples += _draw_trail(img, [centers[c] for c in ids], SIDE_EDGE, SIDE_SAND, R)
+        if len(main_pts) >= 2:
+            samples += _draw_trail(img, main_pts, TRAIL_EDGE, TRAIL_SAND, R)
+        _decorate(img, rng, samples, W, H, R)
 
     # подписи координат и пустые места сетки (только в редакторе)
     if show_grid:
@@ -438,8 +548,11 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
         if on and (kind is None or kind in EFFECT_COLORS):
             label = str(index[cid]) if cid in index else side_label.get(cid)
             if label:
-                d.text((cx - CELL / 2 * SS + 6 * SS, cy - CELL / 2 * SS + 3 * SS), label,
-                       font=small, fill=(190, 194, 202, 255))
+                bx, by = cx - R * 0.72, cy - R * 0.80
+                half = d.textlength(label, font=small) / 2 + 7 * SS
+                d.rounded_rectangle((bx - half, by - 13 * SS, bx + half, by + 13 * SS), radius=13 * SS,
+                                    fill=(28, 30, 34, 235), outline=(255, 255, 255, 255), width=2 * SS)
+                d.text((bx, by), label, font=small, fill=(255, 255, 255, 255), anchor="mm")
         if cid == selected:
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)
@@ -461,6 +574,10 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
                 ImageDraw.Draw(img, "RGBA").ellipse((px - halo, py - halo, px + halo, py + halo),
                                                     fill=(255, 214, 64, 70))
             img.alpha_composite(tile, (int(px - tile.width / 2), int(py - tile.height / 2)))
+            if tok.current:                                   # булавка над ходящим
+                top = py - tile.height / 2 - 4 * SS
+                d.polygon([(px, top), (px - 15 * SS, top - 24 * SS), (px + 15 * SS, top - 24 * SS)],
+                          fill=GOLD, outline=(30, 30, 30, 255))
 
     tw, th = W // SS, H // SS
     big = max(tw, th)
