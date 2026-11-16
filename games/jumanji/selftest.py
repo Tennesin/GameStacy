@@ -5,6 +5,7 @@ from .logic import Match, Player, Track, effective_bots
 from .models import Cell, GameMap, cell_id
 from .rules import BOT_IDS
 from .validator import validate_map
+from .mapedit import initial_tail, parse_cells, place_cells, remove_cell
 
 def make_line(n: int, effects: dict = None, name: str = "Тест") -> GameMap:
     """Прямая трасса из n ячеек змейкой по сетке. effects: индекс -> 'skip' или ('jump', индекс_цели)."""
@@ -119,6 +120,76 @@ def test_jitter():
     assert good.to_dict() == before                      # исходная карта не меняется
     print("шум карты: OK")
 
+def add_road(m: GameMap, branch: str, road: list, exit_id: str):
+    """Особый путь: branch — ячейка маршрута, road — свободные ячейки по порядку, exit_id — выход."""
+    for i, cid in enumerate(road):
+        m.cells[cid] = Cell(cid, next=road[i + 1] if i + 1 < len(road) else exit_id, side=True)
+    m.cells[branch].effect, m.cells[branch].target = "branch", road[0]
+
+def test_branch():
+    def ids(i):
+        return cell_id(i % 10, i // 10)
+
+    m = make_line(20)
+    add_road(m, ids(5), ["A4", "B4", "C4"], ids(9))
+    check("особый путь", m, True)
+    assert GameMap.from_json(m.to_json()).to_dict() == m.to_dict()
+
+    track = Track(m)
+    assert track.cells[20:] == ["A4", "B4", "C4"] and track.label(21) == "5.2"
+
+    # встали ровно на 5, дальше идём по дороге; на третьем броске дорога кончается на клетке 9
+    mt = Match(track, [Player(1, "A"), Player(2, "B")], FixedRng(5, 1, 2, 1, 2))
+    mt.start()
+    mt.roll()
+    assert mt.players[0].pos == 5 and mt.players[0].on_branch
+    mt.roll()                                                              # ходит B
+    mt.roll()                                                              # A: два шага по дороге
+    assert mt.players[0].pos == 21 and not mt.players[0].on_branch
+    mt.roll()                                                              # B
+    mt.roll()                                                              # A: C4 -> выход на клетку 9
+    assert mt.players[0].pos == 9
+
+    # перешагнули начало: идём как обычно
+    mt = Match(track, [Player(1, "A"), Player(2, "B")], FixedRng(6))
+    mt.start()
+    mt.roll()
+    assert mt.players[0].pos == 6 and not mt.players[0].on_branch
+
+    # снимок и восстановление сохраняют заход
+    mt = Match(track, [Player(1, "A"), Player(2, "B")], FixedRng(5))
+    mt.start()
+    mt.roll()
+    again = Match.restore(track, mt.snapshot())
+    assert again.players[0].on_branch and again.snapshot() == mt.snapshot()
+
+    m = make_line(20)                                                      # шесть начал подряд: обязан зайти
+    for k in range(1, 7):
+        add_road(m, ids(k), [cell_id(k - 1, 4)], ids(9))
+    check("обязан войти на особый путь", m, False)
+
+    m = make_line(20)
+    add_road(m, ids(5), ["A4"], ids(19))
+    check("выход на финиш", m, False)
+
+    m = make_line(20)
+    add_road(m, ids(5), ["A4", "B4"], ids(9))
+    m.cells["A4"].effect = "skip"
+    check("эффект на клетке дороги", m, False)
+
+    m = make_line(20)
+    add_road(m, ids(5), ["A4", "B4"], ids(9))
+    m.cells["B4"].next = None
+    check("дорога без выхода", m, False)
+
+    # помощники удаления дороги
+    from .mapedit import remove_cell, remove_road
+    m = make_line(20)
+    add_road(m, ids(5), ["A4", "B4"], ids(9))
+    remove_road(m, ids(5))
+    assert "A4" not in m.cells and "B4" not in m.cells and m.cells[ids(5)].target is None
+    print("особый путь: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -150,6 +221,7 @@ def main():
     test_bonuses()
     test_editor_helpers()
     test_jitter()
+    test_branch()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

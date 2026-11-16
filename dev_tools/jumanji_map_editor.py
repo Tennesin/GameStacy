@@ -16,10 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))                       # чтобы работал import games..., core..., config
 
-from games.jumanji.editor import initial_tail, parse_cells, place_cells, remove_cell
 from games.jumanji.jitter import jittered, new_seed
-from games.jumanji.models import GameMap, MapFormatError, cell_id, parse_cell_id, trace_path
-from games.jumanji.rules import (EFFECTS, EFFECT_TITLES, GRID_DEFAULT_H, GRID_DEFAULT_W, GRID_MAX_H,
+from games.jumanji.mapedit import initial_tail, parse_cells, place_cells, remove_cell, remove_road
+from games.jumanji.models import (Cell, GameMap, MapFormatError, cell_id, follow_road, parse_cell_id,
+                                  side_chains, trace_path)
+from games.jumanji.rules import (BRANCH, EFFECTS, EFFECT_TITLES, GRID_DEFAULT_H, GRID_DEFAULT_W, GRID_MAX_H,
                                  GRID_MAX_W, MAP_NAME_MAX, TARGET_EFFECTS)
 from games.jumanji.validator import validate_map
 
@@ -35,8 +36,10 @@ RING = "#969aa0"
 START_RING, FINISH_RING = "#50c8dc", "#ffc428"
 LINK_ON, LINK_OFF = "#8c929c", "#555961"
 EFFECT_COLORS = {"jump": "#3ba55d", "back": "#ed4245", "skip": "#f0932b",
-                 "charge": "#33a0f0", "mini": "#aa3cff", "reset": "#18191c"}
-EFFECT_ICONS = {"jump": "↑", "back": "↓", "skip": "II", "charge": "+", "mini": "?", "reset": "×"}
+                 "charge": "#33a0f0", "mini": "#aa3cff", "reset": "#18191c", "branch": "#facc15"}
+EFFECT_ICONS = {"jump": "↑", "back": "↓", "skip": "II", "charge": "+", "mini": "?", "reset": "×",
+                "branch": "Y"}
+SIDE_FILL, SIDE_STRIPE, SIDE_RING, SIDE_LINK = "#fde68a", "#d4a017", "#b7791f", "#d6aa28"
 EFFECT_KEYS = {eff: str(i) for i, eff in enumerate(EFFECTS, start=1)}      # jump -> "1" и т. д.
 
 HELP_TEXT = """МЫШЬ
@@ -47,14 +50,24 @@ HELP_TEXT = """МЫШЬ
     «следующей», он соединится с этой ячейкой (так маршрут замыкается на финише).
   Инструмент «Выбрать»: клик - выбрать ячейку.
   Инструмент «Связать»: клик по A, затем по B - «A ведёт в B».
+  Инструмент «Особый путь»:
+    1) клик по ячейке основного маршрута - это начало особого пути;
+    2) клики или протяжка по пустым клеткам - клетки дороги по порядку;
+    3) клик по ячейке основного маршрута - выход дороги, путь готов.
+    Esc - отменить построение. Повторный клик по началу пересоздаёт дорогу.
   Правая кнопка мыши - удалить ячейку (в любом режиме).
 
 КЛАВИШИ (по выбранной ячейке)
-  1 Прыжок   2 Откат   3 Пропуск   4 Заряд   5 Мини-игра   6 Сброс   0 Без эффекта
+  1 Прыжок   2 Откат   3 Пропуск   4 Заряд   5 Мини-игра   6 Сброс   7 Особый путь   0 Без эффекта
   (для прыжка и отката после нажатия кликните по ячейке-цели; Esc - отмена)
   S - старт, F - финиш, Del - удалить ячейку
   Ctrl+Z / Ctrl+Y - отменить / вернуть, Ctrl+S - сохранить, Ctrl+Shift+S - сохранить как,
   Ctrl+O - открыть, Ctrl+N - новая, Ctrl+E - проверить
+
+ОСОБЫЙ ПУТЬ
+  На клетках дороги эффектов, старта и финиша быть не может. Выход дороги не может вести на финиш.
+  Если на начало пути поставить другой эффект или удалить ячейку, дорога удаляется вместе с её клетками.
+  Выход можно переназначить инструментом «Связать» на последней клетке дороги.
 
 ПРЕДПРОСМОТР ШУМА
   Показывает карту так, как увидят игроки. «Новый вариант» - другой случайный вариант.
@@ -82,6 +95,14 @@ def _arc(a, b, bend: float = 0.22) -> list:
                     u * u * a[1] + 2 * u * t * cy + t * t * b[1]))
     return pts
 
+def _stripes(c, x: float, y: float, R: float):
+    """Диагональные полоски внутри круга клетки особого пути."""
+    for o in (-0.6 * R, -0.2 * R, 0.2 * R, 0.6 * R):
+        h = math.sqrt(max(R * R - o * o, 0.0))
+        px, py = x + o * 0.7071, y + o * 0.7071
+        c.create_line(px - h * 0.7071, py + h * 0.7071, px + h * 0.7071, py - h * 0.7071,
+                      fill=SIDE_STRIPE, width=3)
+
 class MapEditor:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -97,6 +118,7 @@ class MapEditor:
         self.redo_stack: list = []
         self.pending = None                             # "jump" / "back": ждём клик по цели
         self.link_from = None                           # инструмент «Связать»: первая ячейка
+        self.road = None                                # построение особого пути
         self.drag_before = None
         self.drag_last = None
         self.S = 48.0
@@ -165,7 +187,8 @@ class MapEditor:
         # --- инструмент
         box = ttk.LabelFrame(side, text="Инструмент", padding=6)
         box.pack(fill="x", pady=(6, 0))
-        for text, val in (("Рисовать путь", "route"), ("Выбрать", "select"), ("Связать", "link")):
+        for text, val in (("Рисовать путь", "route"), ("Выбрать", "select"), ("Связать", "link"),
+                          ("Особый путь", "road")):
             ttk.Radiobutton(box, text=text, value=val, variable=self.tool,
                             command=self.on_tool).pack(side="left", padx=4)
 
@@ -178,8 +201,8 @@ class MapEditor:
         grid.pack(fill="x")
         for i, eff in enumerate(EFFECTS):
             tk.Button(grid, text=f"{EFFECT_ICONS[eff]} {EFFECT_TITLES[eff]} ({EFFECT_KEYS[eff]})",
-                      bg=EFFECT_COLORS[eff], fg="white", activeforeground="white",
-                      activebackground=EFFECT_COLORS[eff], takefocus=0, width=17,
+                      bg=EFFECT_COLORS[eff], fg=("#222222" if eff == BRANCH else "white"),
+                      activeforeground="white", activebackground=EFFECT_COLORS[eff], takefocus=0, width=17,
                       command=lambda e=eff: self.set_effect(e)).grid(row=i // 2, column=i % 2, padx=2, pady=2)
         extra = ttk.Frame(box)
         extra.pack(fill="x", pady=(4, 0))
@@ -282,11 +305,15 @@ class MapEditor:
             self.selected = None
         self.link_from = None
         self.pending = None
+        self.road = None
         self.dirty = True
         self.sync_widgets()
         self.redraw()
 
     def undo(self):
+        if self.road is not None:
+            self.cancel_road()
+            return
         if not self.can_edit():
             return
         if not self.undo_stack:
@@ -297,6 +324,9 @@ class MapEditor:
         self.msg("Отменено.")
 
     def redo(self):
+        if self.road is not None:
+            self.cancel_road()
+            return
         if not self.can_edit():
             return
         if not self.redo_stack:
@@ -306,9 +336,12 @@ class MapEditor:
         self.restore(self.redo_stack.pop())
         self.msg("Возвращено.")
 
-    def can_edit(self) -> bool:
+    def can_edit(self, allow_road: bool = False) -> bool:
         if self.preview.get():
             self.msg("Выключите «Предпросмотр шума», чтобы редактировать.")
+            return False
+        if self.road is not None and not allow_road:
+            self.msg("Идёт построение особого пути: кликните по ячейке выхода или нажмите Esc.")
             return False
         return True
 
@@ -352,6 +385,11 @@ class MapEditor:
 
         path, _problem = trace_path(m)
         index = {cid: i for i, cid in enumerate(path)}
+        chains, _bad = side_chains(m, path)
+        side_label = {}                                              # клетка дороги -> «12.3»
+        for bid, chain, _exit in chains:
+            for k, cid in enumerate(chain, start=1):
+                side_label[cid] = f"{index[bid]}.{k}"
 
         # подписи и точки сетки
         font_small = ("Segoe UI", max(7, int(S * 0.2)))
@@ -383,7 +421,19 @@ class MapEditor:
                     c.create_line(*[p for pt in pts for p in pt], fill=EFFECT_COLORS[cell.effect],
                                   width=3, arrow=tk.LAST, arrowshape=(12, 14, 5))
 
-        # стрелки маршрута
+        # пунктир «начало особого пути -> первая клетка дороги»
+        for cid, cell in v.cells.items():
+            if cell.effect == BRANCH and cid in drawable and cell.target in drawable:
+                a, b = self.center(cid), self.center(cell.target)
+                length = _dist(a, b)
+                if length > 2 * R + 6:
+                    ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+                    c.create_line(a[0] + ux * (R + 1), a[1] + uy * (R + 1),
+                                  b[0] - ux * (R + 2), b[1] - uy * (R + 2),
+                                  fill=EFFECT_COLORS[BRANCH], width=3, dash=(6, 4),
+                                  arrow=tk.LAST, arrowshape=(10, 12, 4))
+
+        # стрелки маршрута (внутри дороги жёлтые)
         for cid, cell in v.cells.items():
             if cid == v.finish or not cell.next or cid not in drawable or cell.next not in drawable:
                 continue
@@ -392,10 +442,13 @@ class MapEditor:
             if length <= 2 * R + 6:
                 continue
             ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+            if cid in side_label:
+                color = SIDE_LINK
+            else:
+                color = LINK_ON if cid in index else LINK_OFF
             c.create_line(a[0] + ux * (R + 1), a[1] + uy * (R + 1),
                           b[0] - ux * (R + 2), b[1] - uy * (R + 2),
-                          fill=LINK_ON if cid in index else LINK_OFF, width=2,
-                          arrow=tk.LAST, arrowshape=(10, 12, 4))
+                          fill=color, width=2, arrow=tk.LAST, arrowshape=(10, 12, 4))
 
         # ячейки
         font_icon = ("Segoe UI", max(8, int(S * 0.3)), "bold")
@@ -404,31 +457,41 @@ class MapEditor:
             if cid not in drawable:
                 continue
             x, y = self.center(cid)
-            on_route = cid in index
+            on_route = cid in index or cid in side_label
             if cid == v.finish:
                 fill, ring, ring_w, text, fg = "#f0f0f0", FINISH_RING, 4, "F", "#1e1e1e"
             elif cid == v.start:
                 fill, ring, ring_w, text, fg = NORMAL, START_RING, 4, "S", "#c82828"
+            elif cell.side:
+                fill, ring, ring_w, text, fg = SIDE_FILL, SIDE_RING, 2, "", "#222222"
             elif cell.effect in EFFECT_COLORS:
                 fill, ring, ring_w = EFFECT_COLORS[cell.effect], RING, 2
-                text, fg = EFFECT_ICONS[cell.effect], "white"
+                text = EFFECT_ICONS[cell.effect]
+                fg = "#222222" if cell.effect == BRANCH else "white"
             else:
                 fill, ring, ring_w, text, fg = NORMAL, RING, 2, "", "#222222"
             dash = (4, 3) if (orphans_matter and not on_route) else None
             c.create_oval(x - R, y - R, x + R, y + R, fill=fill, outline=ring, width=ring_w, dash=dash)
+            if cell.side:
+                _stripes(c, x, y, R)
             if text:
                 c.create_text(x, y, text=text, fill=fg, font=font_icon)
             if on_route:
-                c.create_text(x - R * 0.85, y - R * 0.95, text=str(index[cid]), fill="#aeb3bd",
+                label = str(index[cid]) if cid in index else side_label[cid]
+                c.create_text(x - R * 0.85, y - R * 0.95, text=label, fill="#aeb3bd",
                               font=("Segoe UI", max(7, int(S * 0.19))))
 
         if show:
             return                                                   # в предпросмотре только картинка
 
-        # выбор, конец маршрута, первая ячейка связи
+        # выбор, начало строящегося пути, конец маршрута, первая ячейка связи
         if self.selected in m.cells:
             x, y = self.center(self.selected)
             c.create_oval(x - R - 5, y - R - 5, x + R + 5, y + R + 5, outline="white", width=3)
+        if self.road is not None and self.road["branch"] in m.cells:
+            x, y = self.center(self.road["branch"])
+            c.create_oval(x - R - 8, y - R - 8, x + R + 8, y + R + 8, outline=EFFECT_COLORS[BRANCH],
+                          width=3, dash=(5, 3))
         if self.link_from in m.cells:
             x, y = self.center(self.link_from)
             c.create_oval(x - R - 5, y - R - 5, x + R + 5, y + R + 5, outline=START_RING, width=3, dash=(5, 3))
@@ -453,10 +516,16 @@ class MapEditor:
             bits.append("старт")
         if cid == m.finish:
             bits.append("финиш")
+        if cell.side:
+            bits.append("клетка особого пути (эффектов нет)")
         if cell.effect in EFFECT_TITLES:
             e = EFFECT_TITLES[cell.effect]
             if cell.effect in TARGET_EFFECTS:
                 e += f" → {cell.target}" if cell.target else " → цель не указана!"
+            elif cell.effect == BRANCH:
+                chain, exit_id, problem = follow_road(m, cell.target)
+                e += (f" → дорога {' '.join(chain)} → выход {exit_id}" if problem is None
+                      else f" → {problem}")
             bits.append("эффект: " + e)
         if cid != m.finish:
             bits.append("далее: " + (cell.next or "не указана!"))
@@ -472,8 +541,10 @@ class MapEditor:
         cell = self.map.cells.get(cid)
         extra = ""
         if cell is not None:
+            if cell.side:
+                extra += " · особый путь"
             if cell.effect in EFFECT_TITLES:
-                extra = f" · {EFFECT_TITLES[cell.effect]}"
+                extra += f" · {EFFECT_TITLES[cell.effect]}"
             if cid == self.map.start:
                 extra += " · старт"
             if cid == self.map.finish:
@@ -482,7 +553,7 @@ class MapEditor:
 
     def on_press(self, e):
         self.canvas.focus_set()
-        if not self.can_edit():
+        if not self.can_edit(allow_road=True):
             return
         cid = self.cell_at(e.x, e.y)
         if cid is None:
@@ -498,11 +569,26 @@ class MapEditor:
         elif tool == "select":
             self.selected = cid if cid in self.map.cells else None
             self.redraw()
+        elif tool == "road":
+            self.drag_last = cid
+            self.road_press(cid)
         else:
             self.link_click(cid)
 
     def on_drag(self, e):
-        if self.drag_before is None or self.tool.get() != "route" or self.preview.get():
+        if self.preview.get():
+            return
+        if self.tool.get() == "road":
+            if self.road is None:
+                return
+            cid = self.cell_at(e.x, e.y)
+            if cid is None or cid == self.drag_last:
+                return
+            self.drag_last = cid
+            if cid not in self.map.cells:                            # при протяжке только кладём клетки
+                self.road_click(cid)
+            return
+        if self.drag_before is None or self.tool.get() != "route":
             return
         cid = self.cell_at(e.x, e.y)
         if cid is None or cid == self.drag_last:
@@ -528,6 +614,9 @@ class MapEditor:
         """Рисование пути (без записи в стек отмены: её делает on_release)."""
         m = self.map
         if cid in m.cells:
+            if m.cells[cid].side:
+                self.msg("Это клетка особого пути: основной маршрут через неё не продолжить.")
+                return
             t = self.tail
             if (t in m.cells and t != cid and t != m.finish and not m.cells[t].next
                     and cid != m.start):
@@ -570,10 +659,90 @@ class MapEditor:
         self.msg(f"{src} → {cid}")
         self.commit(before)
 
+    def road_press(self, cid: str):
+        """Клик инструментом «Особый путь»: начало дороги, клетка дороги или выход."""
+        if self.road is None:
+            if cid not in self.map.cells:
+                self.msg("Начало особого пути - готовая ячейка основного маршрута. Сначала поставьте её.")
+                return
+            self.begin_road(cid)
+        else:
+            self.road_click(cid)
+
+    def begin_road(self, cid: str):
+        m = self.map
+        cell = m.cells[cid]
+        if cell.side:
+            self.msg("Начало особого пути должно быть на основном маршруте, а не на дороге.")
+            return
+        if cid in (m.start, m.finish):
+            self.msg("На старте и финише эффектов быть не может.")
+            return
+        before = self.state()
+        remove_road(m, cid)                                          # старая дорога этой ячейки пересоздаётся
+        cell.effect, cell.target = BRANCH, None
+        self.pending = self.link_from = None
+        self.road = {"branch": cid, "before": before, "dirty": self.dirty}
+        self.selected = cid
+        self.msg(f"Особый путь от {cid}: кликайте по пустым клеткам (дорога по порядку), "
+                 "затем по ячейке основного маршрута (выход). Esc - отмена.")
+        self.redraw()
+
+    def road_click(self, cid: str):
+        m, r = self.map, self.road
+        bid = r["branch"]
+        if cid not in m.cells:                                       # новая клетка дороги
+            m.cells[cid] = Cell(cid, side=True)
+            if r["cells"]:
+                m.cells[r["cells"][-1]].next = cid
+            else:
+                m.cells[bid].target = cid
+            r["cells"].append(cid)
+            self.selected = cid
+            self.msg(f"Клетка дороги {cid} (всего {len(r['cells'])}). Выход - клик по ячейке маршрута.")
+            self.redraw()
+            return
+
+        # клик по готовой ячейке: это выход
+        cell = m.cells[cid]
+        if cid == bid:
+            self.msg("Выход не может совпадать с началом пути.")
+        elif cell.side:
+            self.msg("Эта клетка уже принадлежит особому пути.")
+        elif cid == m.finish:
+            self.msg("Выход не может вести на финиш: финиш берётся только точным броском.")
+        elif not r["cells"]:
+            self.msg("Сначала поставьте хотя бы одну клетку дороги.")
+        else:
+            path, _problem = trace_path(m)
+            if cid not in path:
+                self.msg("Выход должен лежать на основном маршруте (от старта).")
+                return
+            m.cells[r["cells"][-1]].next = cid
+            self.finish_road(cid)
+
+    def finish_road(self, exit_id: str):
+        r, self.road = self.road, None
+        self.msg(f"Особый путь от {r['branch']} готов: {len(r['cells'])} клеток, выход {exit_id}.")
+        self.commit(r["before"])
+
+    def cancel_road(self):
+        r, self.road = self.road, None
+        if r is None:
+            return
+        self.restore(r["before"])
+        self.dirty = r["dirty"]
+        self.update_title()
+        self.msg("Построение особого пути отменено.")
+
     def on_tool(self):
+        if self.road is not None:
+            self.cancel_road()
         self.pending = None
         self.link_from = None
         self.canvas.config(cursor="")
+        if self.tool.get() == "road":
+            self.msg("Особый путь: кликните по ячейке основного маршрута, это будет начало дороги.")
         self.redraw()
 
     # ==================== Правки выбранной ячейки ====================
@@ -591,8 +760,16 @@ class MapEditor:
         if cid is None:
             return
         m = self.map
+        if m.cells[cid].side:
+            self.msg("На клетках особого пути эффектов быть не может.")
+            return
         if eff is not None and cid in (m.start, m.finish):
             self.msg("На старте и финише эффектов быть не может.")
+            return
+        if eff == BRANCH:
+            self.tool.set("road")
+            self.on_tool()
+            self.begin_road(cid)
             return
         if eff in TARGET_EFFECTS:
             self.pending = eff
@@ -600,6 +777,7 @@ class MapEditor:
             self.msg(f"{EFFECT_TITLES[eff]}: кликните по ячейке-цели (Esc — отмена).")
             return
         before = self.state()
+        remove_road(m, cid)                                          # был особый путь: дорога удаляется
         cell = m.cells[cid]
         cell.effect, cell.target = eff, None
         self.msg(f"{cid}: " + (EFFECT_TITLES[eff] if eff else "эффект снят"))
@@ -613,7 +791,11 @@ class MapEditor:
         if cid == src:
             self.msg("Цель не может совпадать с самой ячейкой.")
             return
+        if m.cells[cid].side:
+            self.msg("Цель должна лежать на основном маршруте, а не на особом пути.")
+            return
         before = self.state()
+        remove_road(m, src)                                          # был особый путь: дорога удаляется
         cell = m.cells[src]
         cell.effect, cell.target = eff, cid
         self.pending = None
@@ -622,6 +804,9 @@ class MapEditor:
         self.commit(before)
 
     def cancel_pending(self):
+        if self.road is not None:
+            self.cancel_road()
+            return
         if self.pending or self.link_from:
             self.pending, self.link_from = None, None
             self.canvas.config(cursor="")
@@ -635,10 +820,14 @@ class MapEditor:
         if cid is None:
             return
         m = self.map
+        if m.cells[cid].side:
+            self.msg("Старт не может быть на клетке особого пути.")
+            return
         if cid == m.finish:
             self.msg("Финиш не может быть стартом.")
             return
         before = self.state()
+        remove_road(m, cid)
         m.start = cid
         m.cells[cid].effect = m.cells[cid].target = None
         self.msg(f"Старт: {cid}")
@@ -651,10 +840,14 @@ class MapEditor:
         if cid is None:
             return
         m = self.map
+        if m.cells[cid].side:
+            self.msg("Финиш не может быть на клетке особого пути.")
+            return
         if cid == m.start:
             self.msg("Старт не может быть финишем.")
             return
         before = self.state()
+        remove_road(m, cid)
         m.finish = cid
         cell = m.cells[cid]
         cell.effect = cell.target = cell.next = None
@@ -667,6 +860,7 @@ class MapEditor:
                 self.msg("Сначала выберите ячейку.")
             return
         before = self.state()
+        remove_road(self.map, cid)                                   # у начала особого пути уходит и дорога
         remove_cell(self.map, cid)
         self.tail = initial_tail(self.map)
         if self.selected == cid:
@@ -763,6 +957,8 @@ class MapEditor:
 
     def toggle_preview(self):
         if self.preview.get():
+            if self.road is not None:
+                self.cancel_road()
             self.pending = self.link_from = None
             self.canvas.config(cursor="")
             self._build_preview()
@@ -786,6 +982,8 @@ class MapEditor:
         return rep
 
     def export(self):
+        if self.road is not None:
+            self.cancel_road()
         m = self.map
         if not m.name.strip() or len(m.name.strip()) > MAP_NAME_MAX:
             messagebox.showerror("Экспорт", f"Название карты должно быть от 1 до {MAP_NAME_MAX} символов.")
@@ -839,6 +1037,7 @@ class MapEditor:
         self.tail = initial_tail(m)
         self.selected = None
         self.pending = self.link_from = None
+        self.road = None
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.preview.set(False)
