@@ -249,6 +249,8 @@ class Match:
             if self.sixes >= LUDO_MAX_SIXES_IN_ROW:            # третья подряд: ход не выполняется
                 self._reset_timeouts(p)
                 return ev + [Event("three_sixes", p.pid)] + self._pass_turn()
+        else:
+            self.sixes = 0                                     # цепочка шестёрок прервалась
 
         moves = self.legal_moves(p, d)
         if not moves:
@@ -323,7 +325,7 @@ class Match:
             ev.append(Event("piece_home", p.pid, {"piece": m.piece}))
         elif m.kind == "home":
             ev.append(Event("home_column", p.pid, {"piece": m.piece}))
-        elif sum(1 for x in p.pieces if x == m.to) >= 2:       # на кольце две свои фигуры = блок
+        elif m.to <= LUDO_RING_STEPS and sum(1 for x in p.pieces if x == m.to) >= 2:
             ev.append(Event("block", p.pid, {"piece": m.piece, "to": m.to}))
 
         if all(x == LUDO_FINISH for x in p.pieces):

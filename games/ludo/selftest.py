@@ -82,6 +82,17 @@ def test_capture_and_safety():
     assert "capture" in kinds(ev) and b.pieces[0] == 0 and a.pieces[0] == 1
     print("взятие и безопасные клетки: OK")
 
+def test_sixes_reset_and_column_block():
+    m, a, b = duo(FixedRng(3)); a.pieces = [10, 0, 0, 0]; b.pieces = [39, 0, 0, 0]
+    m.sixes = 2
+    ev = m.roll()
+    assert "capture" in kinds(ev) and m.current_player is a and m.sixes == 0
+    m, a, b = duo(FixedRng(1)); a.pieces = [54, 53, 0, 0]
+    m.roll()
+    ev = m.choose(1)
+    assert "block" not in kinds(ev) and a.pieces == [54, 54, 0, 0]
+    print("сброс шестёрок и колонка без блоков: OK")
+
 def test_blocks():
     m, a, b = duo(); a.pieces = [5, 5, 0, 0]; b.pieces = [29, 0, 0, 0]       # блок A на клетке 4, B стоит на клетке 2
     assert [x.piece for x in m.legal_moves(b, 1)] == [0]                      # на клетку 3 можно
@@ -245,6 +256,7 @@ def main():
     test_basic()
     test_three_sixes()
     test_capture_and_safety()
+    test_sixes_reset_and_column_block()
     test_blocks()
     test_exact_finish()
     test_pick_and_auto()
