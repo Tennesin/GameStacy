@@ -157,6 +157,58 @@ def effective_bots(humans: int, setting: int) -> int:
     bots = max(bots, 1 if humans < 2 else 0)
     return max(0, min(bots, MAX_PLAYERS - humans))
 
+class OrderRoll:
+    """Определение очереди ходов перед партией."""
+
+    def __init__(self, pids: list, rng: Optional[random.Random] = None):
+        if len(set(pids)) != len(pids):
+            raise ValueError("ID участников повторяются.")
+        self.rng = rng or random.Random()
+        self.slots: list = [list(pids)]              # упорядоченные группы; группа из одного = место определено
+        self.history: dict = {pid: [] for pid in pids}   # pid -> числа по раундам
+        self.rounds = 0                              # сколько раундов уже записано
+
+    @property
+    def done(self) -> bool:
+        return all(len(g) == 1 for g in self.slots)
+
+    def active(self) -> list:
+        return [pid for g in self.slots if len(g) > 1 for pid in g]
+
+    def throw(self) -> int:
+        return self.rng.randint(1, DICE_SIDES)
+
+    def last(self, pid: int) -> Optional[int]:
+        h = self.history.get(pid)
+        return h[-1] if h else None
+
+    def apply(self, rolls: dict):
+        self.rounds += 1
+        new = []
+        for group in self.slots:
+            if len(group) == 1:
+                new.append(group)
+                continue
+            by_value: dict = {}
+            for pid in group:
+                self.history[pid].append(rolls[pid])
+                by_value.setdefault(rolls[pid], []).append(pid)
+            for value in sorted(by_value, reverse=True):     # большее число - раньше
+                new.append(by_value[value])
+        self.slots = new
+
+    def force(self):
+        """Предохранитель: все оставшиеся ничьи решаются жребием."""
+        new = []
+        for group in self.slots:
+            group = list(group)
+            self.rng.shuffle(group)
+            new.extend([pid] for pid in group)
+        self.slots = new
+
+    def order(self) -> list:
+        return [pid for g in self.slots for pid in g]
+
 # ---------- Участники и события ----------
 
 @dataclass

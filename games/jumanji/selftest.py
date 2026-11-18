@@ -1,11 +1,11 @@
 """Самопроверка движка и валидатора. Запуск из корня проекта:  python -m games.jumanji.selftest"""
 import random
 
-from .logic import Match, Player, Track, effective_bots
 from .models import Cell, GameMap, cell_id
 from .rules import BOT_IDS
 from .validator import validate_map
 from .mapedit import initial_tail, parse_cells, place_cells, remove_cell
+from .logic import Match, OrderRoll, Player, Track, effective_bots
 
 def make_line(n: int, effects: dict = None, name: str = "Тест") -> GameMap:
     """Прямая трасса из n ячеек змейкой по сетке. effects: индекс -> 'skip' или ('jump', индекс_цели)."""
@@ -201,6 +201,27 @@ def test_colors():
     assert len(set(cols)) == len(cols), cols
     print("цвета фишек: OK")
 
+def test_order():
+    for seed in range(300):
+        pids = [1, 2, 3, BOT_IDS[0], BOT_IDS[1]]
+        o = OrderRoll(pids, random.Random(seed))
+        for _ in range(200):
+            if o.done:
+                break
+            act = o.active()
+            assert len(act) >= 2                                   # бросают только те, у кого ничья
+            o.apply({p: o.throw() for p in act})
+        assert o.done and sorted(o.order()) == sorted(pids)
+        order = o.order()
+        for a, b in zip(order, order[1:]):                         # первый различающийся бросок: у стоящего раньше больше
+            ha, hb = o.history[a], o.history[b]
+            k = next((i for i in range(min(len(ha), len(hb))) if ha[i] != hb[i]), None)
+            assert k is not None and ha[k] > hb[k], (seed, order, o.history)
+    o = OrderRoll([1, 2, 3], random.Random(1))
+    o.force()
+    assert o.done and sorted(o.order()) == [1, 2, 3]
+    print("очередь ходов: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -234,6 +255,7 @@ def main():
     test_jitter()
     test_branch()
     test_colors()
+    test_order()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

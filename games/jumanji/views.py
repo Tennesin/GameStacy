@@ -103,6 +103,27 @@ class PlayView(discord.ui.View):
         await self.ctrl.fail(interaction, self.game_id, error)
         self.stop()
 
+class OrderView(discord.ui.View):
+    """Под табло определения очереди ходов: одна кнопка броска."""
+
+    def __init__(self, ctrl, game_id: int, locked: bool = False):
+        super().__init__(timeout=None)
+        self.ctrl, self.game_id = ctrl, game_id
+        btn = discord.ui.Button(label="Бросить кубик", emoji="🎲",
+                                style=discord.ButtonStyle.secondary if locked else discord.ButtonStyle.success,
+                                custom_id=f"jmj:{game_id}:oroll", row=0, disabled=locked)
+        btn.callback = self._on_roll
+        self.add_item(btn)
+
+    async def _on_roll(self, i: discord.Interaction):
+        await self.ctrl.order_roll(i, self.game_id)
+
+    async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
+        await self.ctrl.fail(interaction, self.game_id, error)
+        self.stop()
+
 class ConfirmLeaveView(discord.ui.View):
     """Скрытое окно «Выйти? Да / Нет»."""
 

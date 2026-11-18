@@ -20,14 +20,17 @@ from core.clock import fmt_duration
 from core.scope import ignore, in_scope
 from .avatars import avatar_url, load_avatars
 from .console import console_jmap
-from .logic import Match, Player, Track, effective_bots
+from .logic import Match, OrderRoll, Player, Track, effective_bots
 from .models import GameMap, MapFormatError
 from .render import BOT_NAMES, make_tokens, map_key, render_board_async
-from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
-                    MIN_PLAYERS, MINI_GAME_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
+from .rules import (
+    BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
+    MIN_PLAYERS, MINI_GAME_PICK_SECONDS, ORDER_MAX_ROUNDS, ORDER_PAUSE_SECONDS,
+    ORDER_ROLL_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS
+)
 from .storage import Storage
 from .texts import describe
-from .views import ConfirmLeaveView, LobbyView, PlayView
+from .views import ConfirmLeaveView, LobbyView, OrderView, PlayView
 
 log = logging.getLogger("stacy.jumanji")
 
@@ -35,7 +38,11 @@ NO_PINGS = discord.AllowedMentions.none()
 MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
 HUMAN_EMOJI = ["🔵", "🟢", "🟡", "🔴", "🟠"]       # порядок как у HUMAN_COLORS в render.py
 BOT_EMOJI = ["🟣", "🩷", "🩵", "🟤"]               # порядок как у BOT_COLORS
-RULES_TEXT = (f"**Правила.** Бросайте кубик по очереди (на ход {TURN_SECONDS} секунд) и идите к финишу. "
+ORDERING = "ordering"
+
+RULES_TEXT = (f"**Правила.** Перед началом все бросают кубик (на бросок {ORDER_ROLL_SECONDS} секунд): "
+              "у кого число больше, тот ходит раньше; если числа совпали, эти игроки бросают снова.\n"
+              f"Дальше бросайте кубик по очереди (на ход {TURN_SECONDS} секунд) и идите к финишу. "
               "Если до финиша осталось меньше, чем выпало, вы остаётесь на месте: финиш берётся точным броском.\n"
               "Цветные клетки: 🟢 прыжок вперёд, 🔴 откат, 🟠 пропуск хода, 🔵 ещё бросок, "
               "🟣 мини-игра для всех, ⚫ возврат на старт, "
@@ -72,13 +79,40 @@ class Runtime:
     map_key: Optional[int] = None       # хэш карты для кэша картинки (считается один раз)
     started: Optional[datetime] = None  # когда партия началась (None у партий, начатых до появления этой колонки)
 
+@dataclass
+class OrderPhase:
+    """Определение очереди перед партией. Живёт только в памяти: при перезапуске лобби открывается заново."""
+    game_id: int
+    roll: OrderRoll
+    players: list                       # Player уже с цветами, в порядке лобби (порядок ходов определит бросок)
+    names: dict                         # pid -> имя
+    colors: dict                        # pid -> номер цвета (только люди)
+    avatars: dict                       # pid -> ссылка на аватарку
+    humans: set                         # ID людей
+    bots: list                          # [(pid, имя)]
+    gmap: GameMap
+    track: Track
+    map_row: object                     # строка карты из БД (копия кладётся в партию при старте)
+    channel_id: int
+    message_id: int
+    solo: bool
+    rolls: dict = field(default_factory=dict)       # броски текущего раунда
+    need: set = field(default_factory=set)          # люди, которые должны бросить в этом раунде
+    auto: set = field(default_factory=set)          # за кого бросила система в этом раунде
+    open: bool = False                              # принимаются ли нажатия кнопки
+    forced: bool = False                            # ничью решил жребий (сработал предохранитель)
+    ends: int = 0                                   # unix-время конца приёма бросков
+    all_rolled: asyncio.Event = field(default_factory=asyncio.Event)
+    task: Optional[asyncio.Task] = None
+
 class JumanjiController:
     def __init__(self, bot, storage: Storage):
         self.bot = bot
         self.db = storage
         self.locks = LockMap()
-        self.rt: dict = {}                  # game_id -> Runtime идущих партий
+        self.rt: dict = {}
         self.lobby_timers: dict = {}
+        self.ordering: dict = {}
         self.bg: set = set()
 
     # ==================== Запуск ====================
@@ -127,9 +161,16 @@ class JumanjiController:
         for g in self.db.active():
             gid = g["game_id"]
             if g["status"] == "lobby":
-                self.bot.add_view(self._lobby_view(g), message_id=g["message_id"])
-                idle = (self.bot.clock.now() - datetime.fromisoformat(g["updated_utc"])).total_seconds()
-                self._schedule_expiry(gid, max(0.0, LOBBY_SECONDS - idle))
+                view = self._lobby_view(g)
+                self.bot.add_view(view, message_id=g["message_id"])
+                if g["result"] == ORDERING:
+                    # бот перезапустился во время броска за очередь: возвращаем лобби в исходный вид
+                    self.db.set_result(gid, None)
+                    self._schedule_expiry(gid, LOBBY_SECONDS)
+                    self._spawn(self._reopen_lobby(gid, view))
+                else:
+                    idle = (self.bot.clock.now() - datetime.fromisoformat(g["updated_utc"])).total_seconds()
+                    self._schedule_expiry(gid, max(0.0, LOBBY_SECONDS - idle))
                 continue
             rt = self._load_runtime(g)
             if rt is None:
@@ -138,6 +179,20 @@ class JumanjiController:
             self.rt[gid] = rt
             self.bot.add_view(self._play_view(rt), message_id=g["message_id"])
             self._spawn(self._resume(rt))
+
+    async def _reopen_lobby(self, game_id: int, view):
+        """После перезапуска во время броска за очередь: сообщение снова становится обычным лобби."""
+        await self.bot.wait_until_ready()
+        g = self._lobby_row(game_id)
+        if g is None or not g["message_id"]:
+            return
+        text = (self._lobby_text(g)[:1850]
+                + "\n⚠️ Бот перезапускался, очередь ходов не успела определиться: нажмите «▶ Играть» ещё раз.")
+        try:
+            await self.bot.get_partial_messageable(g["channel_id"]).get_partial_message(g["message_id"]).edit(
+                content=text, view=view, allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            log.exception("Не удалось восстановить лобби #%s после перезапуска", game_id)
 
     def _load_runtime(self, g) -> Optional[Runtime]:
         try:
@@ -172,6 +227,8 @@ class JumanjiController:
         return LobbyView(self, g["game_id"], g, self.db.list_maps()[:25])
 
     def _lobby_row(self, game_id: int):
+        if game_id in self.ordering:
+            return None
         g = self.db.get(game_id)
         return g if g is not None and g["status"] == "lobby" else None
 
@@ -360,23 +417,197 @@ class JumanjiController:
                 await interaction.response.send_message("Для игры нужно минимум два участника.", ephemeral=True)
                 return
 
-            await interaction.response.defer()                     # дальше будет картинка: может занять время
+            await interaction.response.defer()
             self._cancel_lobby_timer(game_id)
+            self.db.set_result(game_id, ORDERING)                  # на случай перезапуска во время броска
             bots = [(BOT_IDS[i], BOT_NAMES[i]) for i in range(n_bots)]
-            players = ([Player(r["pid"], r["name"]) for r in humans]
+            players = ([Player(r["pid"], r["name"], color=i) for i, r in enumerate(humans)]
                        + [Player(pid, name, True) for pid, name in bots])
-            random.shuffle(players)                                # порядок ходов случайный
-            match = Match(track, players)
-            events = match.start()
-            started = self.db.start(game_id, map_row, bots, match.snapshot(), None)
+            ph = OrderPhase(
+                game_id=game_id, roll=OrderRoll([p.pid for p in players]), players=players,
+                names={r["pid"]: r["name"] for r in humans} | dict(bots),
+                colors={p.pid: p.color for p in players if not p.is_bot},
+                avatars={r["pid"]: r["avatar_url"] for r in humans},
+                humans={r["pid"] for r in humans}, bots=bots, gmap=gmap, track=track, map_row=map_row,
+                channel_id=g["channel_id"], message_id=g["message_id"], solo=bool(g["solo"]))
+            self.ordering[game_id] = ph
+            ph.task = self._spawn(self._order_phase(ph))
 
-            names = {r["pid"]: r["name"] for r in humans} | dict(bots)
-            avatars = {r["pid"]: r["avatar_url"] for r in humans}
-            rt = Runtime(game_id, match, gmap, names, avatars, g["channel_id"], g["message_id"], bool(g["solo"]))
+    # ==================== Определение очереди ходов ====================
+
+    @staticmethod
+    def _tag(pid: int, name, color: int) -> str:
+        """Подпись игрока с цветным значком (до создания партии Runtime ещё нет)."""
+        if pid in BOT_IDS:
+            return f"{BOT_EMOJI[BOT_IDS.index(pid)]} {bot_name(pid)}"
+        return f"{HUMAN_EMOJI[color % len(HUMAN_EMOJI)]} {esc(name)}"
+
+    def _ph_tag(self, ph: OrderPhase, pid: int) -> str:
+        return self._tag(pid, ph.names.get(pid, pid), ph.colors.get(pid, 0))
+
+    def _order_status(self, ph: OrderPhase, stage: str, pid: int, tied: bool, active: set) -> str:
+        if stage == "open" and pid in active:
+            v = ph.rolls.get(pid)
+            return f"🎲 **{v}**" if v is not None else "⏳ ждёт броска"
+        last = ph.roll.last(pid)
+        text = f"🎲 **{last if last is not None else '—'}**"
+        if stage == "result" and pid in ph.auto:
+            text += " (бросила система)"
+        if tied:
+            text += " · ничья"
+        return text
+
+    def _order_text(self, ph: OrderPhase, stage: str) -> str:
+        """stage: «open» - идёт приём бросков; «result» - итоги раунда."""
+        r = ph.roll
+        lines = [f"🎲 **Джуманджи** · партия #{ph.game_id} · карта «{esc(ph.gmap.name)}»",
+                 "**Кто ходит первым?** У кого число больше, тот ходит раньше. "
+                 "Если числа совпали, эти игроки бросают снова.", ""]
+        active = set(r.active()) if stage == "open" else set()
+        place = 1
+        for group in r.slots:
+            n = len(group)
+            label = f"{place}." if n == 1 else f"{place}–{place + n - 1}."
+            place += n
+            for pid in group:
+                lines.append(f"{label} {self._ph_tag(ph, pid)} — "
+                             + self._order_status(ph, stage, pid, n > 1, active))
+        lines.append("")
+        if stage == "open":
+            got = sum(1 for pid in ph.need if pid in ph.rolls)
+            lines.append(f"Раунд {r.rounds + 1} · нажмите «Бросить кубик» <t:{ph.ends}:R> "
+                         f"(на бросок {ORDER_ROLL_SECONDS} с). Бросили: {got}/{len(ph.need)}")
+            if r.rounds:
+                lines.append("🔁 Перебрасывают: " + ", ".join(self._ph_tag(ph, p) for p in r.active()))
+        elif r.done:
+            lines.append("✅ Очередь определена"
+                         + (" (ничья решена жребием)" if ph.forced else "") + ". Игра начинается…")
+        else:
+            lines.append(f"Раунд {r.rounds} завершён. 🔁 Ничья: перебрасывают "
+                         + ", ".join(self._ph_tag(ph, p) for p in r.active()))
+        return "\n".join(lines)[:1990]
+
+    async def _order_show(self, ph: OrderPhase, text: str, locked: bool):
+        """Правит сообщение с табло очереди; если его удалили, отправляет новое."""
+        chan = self.bot.get_partial_messageable(ph.channel_id)
+        view = OrderView(self, ph.game_id, locked=locked)
+        try:
+            await chan.get_partial_message(ph.message_id).edit(content=text, view=view,
+                                                               allowed_mentions=NO_PINGS)
+        except discord.NotFound:
+            try:
+                new = await chan.send(text, view=view, allowed_mentions=NO_PINGS)
+                ph.message_id = new.id
+                self.db.set_message(ph.game_id, new.id)
+            except discord.HTTPException:
+                log.exception("Не удалось отправить табло очереди партии #%s", ph.game_id)
+        except discord.HTTPException:
+            log.exception("Не удалось обновить табло очереди партии #%s", ph.game_id)
+
+    async def order_roll(self, interaction: discord.Interaction, game_id: int):
+        """Нажата кнопка «Бросить кубик» при определении очереди."""
+        ph = self.ordering.get(game_id)
+        if ph is None:
+            await interaction.response.send_message("Очередь ходов уже определена.", ephemeral=True)
+            return
+        g = self.db.get(game_id)
+        if g is None or not await self._guard(interaction, g):
+            return
+        uid = interaction.user.id
+        if uid not in ph.humans:
+            problem = "Вы не участвуете в этой партии."
+        elif not ph.open:
+            problem = "Сейчас приём бросков закрыт."
+        elif uid not in ph.need:
+            problem = "Ваше место уже определено: сейчас перебрасывают только те, у кого выпали одинаковые числа."
+        elif uid in ph.rolls:
+            problem = "Вы уже бросили кубик в этом раунде."
+        else:
+            problem = None
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
+            return
+
+        ph.rolls[uid] = ph.roll.throw()                            # записываем до любых await
+        await interaction.response.edit_message(content=self._order_text(ph, "open"),
+                                                allowed_mentions=NO_PINGS)
+        if ph.need <= ph.rolls.keys():                             # сигнал только после ответа на нажатие
+            ph.all_rolled.set()
+
+    async def _order_phase(self, ph: OrderPhase):
+        """Раунды броска: боты бросают сами, люди кнопкой (не успели - бросает система), ничьи перебрасываются."""
+        try:
+            while not ph.roll.done:
+                if ph.roll.rounds >= ORDER_MAX_ROUNDS:             # предохранитель от бесконечных ничьих
+                    ph.roll.force()
+                    ph.forced = True
+                    await self._order_show(ph, self._order_text(ph, "result"), locked=True)
+                    await asyncio.sleep(ORDER_PAUSE_SECONDS)
+                    break
+                active = ph.roll.active()
+                ph.rolls = {pid: ph.roll.throw() for pid in active if pid not in ph.humans}   # боты
+                ph.need = {pid for pid in active if pid in ph.humans}
+                ph.auto = set()
+                ph.all_rolled.clear()
+                if ph.need:
+                    ph.ends = int(self.bot.clock.now().timestamp()) + ORDER_ROLL_SECONDS
+                    ph.open = True
+                    await self._order_show(ph, self._order_text(ph, "open"), locked=False)
+                    try:
+                        await asyncio.wait_for(ph.all_rolled.wait(), timeout=ORDER_ROLL_SECONDS)
+                    except asyncio.TimeoutError:
+                        pass
+                    ph.open = False
+                    for pid in sorted(ph.need - ph.rolls.keys()):  # не успели: бросает система
+                        ph.rolls[pid] = ph.roll.throw()
+                        ph.auto.add(pid)
+                ph.roll.apply(ph.rolls)
+                await self._order_show(ph, self._order_text(ph, "result"), locked=True)
+                await asyncio.sleep(ORDER_PAUSE_SECONDS)
+            await self._order_finish(ph)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Сбой определения очереди в партии #%s", ph.game_id)
+            rt = self.rt.get(ph.game_id)
+            if rt is not None:
+                await self._fail_silent(rt)
+            else:
+                await self._order_fail(ph)
+
+    async def _order_finish(self, ph: OrderPhase):
+        """Очередь готова: создаём партию в этом порядке и показываем обычное табло."""
+        async with self.locks[ph.game_id]:
+            g = self.db.get(ph.game_id)
+            if self.ordering.get(ph.game_id) is not ph or g is None or g["status"] != "lobby":
+                return
+            self.ordering.pop(ph.game_id, None)
+            by_pid = {p.pid: p for p in ph.players}
+            players = [by_pid[pid] for pid in ph.roll.order()]
+            match = Match(ph.track, players)
+            events = match.start()
+            self.db.set_result(ph.game_id, None)
+            started = self.db.start(ph.game_id, ph.map_row, ph.bots, match.snapshot(), None)
+
+            rt = Runtime(ph.game_id, match, ph.gmap, ph.names, ph.avatars,
+                         ph.channel_id, ph.message_id, ph.solo)
             rt.started = datetime.fromisoformat(started)
             rt.log.append("🎬 Игра началась!")
-            self.rt[game_id] = rt
+            rt.log.append("🎲 Очередь ходов: " + " → ".join(self._ph_tag(ph, p.pid) for p in players))
+            self.rt[ph.game_id] = rt
             await self._after(rt, events)
+
+    async def _order_fail(self, ph: OrderPhase):
+        """Сбой до создания партии: закрываем набор и извиняемся."""
+        self.ordering.pop(ph.game_id, None)
+        self.db.abort(ph.game_id, "error")
+        chan = self.bot.get_partial_messageable(ph.channel_id)
+        try:
+            await chan.get_partial_message(ph.message_id).edit(
+                content="⚠️ Партия закрыта из-за технической ошибки.", view=None, attachments=[])
+            await chan.send(TECH_ERROR_TEXT.format(dev=DEV_ID))
+        except discord.HTTPException:
+            log.exception("Не удалось сообщить о сбое определения очереди #%s", ph.game_id)
 
     # ---- таймер набора ----
 
@@ -552,6 +783,7 @@ class JumanjiController:
         t = asyncio.create_task(coro)
         self.bg.add(t)
         t.add_done_callback(self.bg.discard)
+        return t
 
     async def purge_loop(self):
         """Раз в сутки удаляет завершённые и закрытые партии старше 30 дней."""
@@ -802,6 +1034,9 @@ class JumanjiController:
 
     async def fail(self, interaction: discord.Interaction, game_id: int, error: BaseException):
         """Нештатный сбой в кнопке: партия закрывается, в консоли Traceback, в Discord извинение."""
+        ph = self.ordering.pop(game_id, None)
+        if ph is not None and ph.task is not None and ph.task is not asyncio.current_task():
+            ph.task.cancel()
         rt = self.rt.pop(game_id, None)
         if rt is not None:
             self._cancel(rt)

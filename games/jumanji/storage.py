@@ -159,6 +159,10 @@ class Storage:
     def set_ping(self, game_id: int, message_id: Optional[int]):
         self._set(game_id, ping_id=message_id)
 
+    def set_result(self, game_id: int, result: Optional[str]):
+        """Служебная отметка партии (например, «ordering» на время определения очереди)."""
+        self._set(game_id, result=result)
+
     def update_settings(self, game_id: int, solo: Optional[bool] = None,
                         bots: Optional[int] = None, map_id: Optional[int] = None):
         """Настройки лобби: только те, что переданы."""
