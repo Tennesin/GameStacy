@@ -352,6 +352,26 @@ def _stripes(img, cx: float, cy: float, R: int, alpha: int):
     tile.putalpha(ImageChops.multiply(tile.getchannel("A"), mask))
     img.alpha_composite(tile, (int(cx - R), int(cy - R)))
 
+CHESS_SQUARES = 8                                    # клеток доски по стороне
+CHESS_DARK, CHESS_LIGHT = (28, 28, 30), (245, 245, 245)
+
+def _checker(img, cx: float, cy: float, R: int, alpha: int):
+    """Шахматная доска внутри круга ячейки (для финиша)."""
+    size = int(2 * R)
+    n = CHESS_SQUARES
+    tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tile)
+    for i in range(n):
+        for j in range(n):
+            x0, x1 = round(i * size / n), round((i + 1) * size / n)
+            y0, y1 = round(j * size / n), round((j + 1) * size / n)
+            color = CHESS_LIGHT if (i + j) % 2 == 0 else CHESS_DARK
+            td.rectangle((x0, y0, x1 - 1, y1 - 1), fill=color + (alpha,))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    tile.putalpha(ImageChops.multiply(tile.getchannel("A"), mask))
+    img.alpha_composite(tile, (int(cx - R), int(cy - R)))
+
 def _bounds(m: GameMap, show_grid: bool) -> tuple:
     pts = [p for p in (parse_cell_id(c) for c in m.cells) if p]
     if show_grid or not pts:
@@ -609,8 +629,11 @@ def _draw_cells(c: _Ctx, selected: Optional[str]):
         if cell.side:
             _stripes(c.img, cx, cy, R, a)
             d.ellipse(circle, outline=ring + (a,), width=width)
-        if kind in ("start", "finish"):
-            _icon(d, kind, cx, cy, fg + (a,))
+        if kind == "finish":
+            _checker(c.img, cx, cy, R, a)
+            d.ellipse(circle, outline=ring + (a,), width=width)
+        elif kind == "start":
+            _icon(d, "start", cx, cy, fg + (a,))
         if cid == selected:
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)

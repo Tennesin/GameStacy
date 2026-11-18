@@ -1,8 +1,6 @@
 """Единый показ технической ошибки: traceback в консоль, извинение в Discord."""
-
 import logging
 from typing import Optional
-
 import discord
 
 from config import DEV_ID

@@ -75,6 +75,9 @@ MIGRATIONS = [
     """
     ALTER TABLE games ADD COLUMN ping_id INTEGER;   -- сообщение «ваш ход» с тегом: после перезапуска его нужно удалить
     """,
+    """
+    ALTER TABLE games ADD COLUMN started_utc TEXT;   -- когда партия началась (для длительности в итогах)
+    """,
 ]
 
 _GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "host_id", "status", "solo", "bots", "map_id",
@@ -205,9 +208,8 @@ class Storage:
 
     # ---------- Ход партии ----------
 
-    def start(self, game_id: int, map_row, bots: list, snapshot: dict, deadline: Optional[str]):
-        """Запуск партии одной транзакцией: боты садятся за стол, карта копируется в партию.
-        map_row — строка из maps; bots — список (pid, имя)."""
+    def start(self, game_id: int, map_row, bots: list, snapshot: dict, deadline: Optional[str]) -> str:
+        """Запуск партии одной транзакцией: боты садятся за стол, карта копируется в партию."""
         now = self._now()
         with self.con:
             seat = self.con.execute("SELECT COALESCE(MAX(seat), -1) FROM game_players WHERE game_id=?",
@@ -218,9 +220,10 @@ class Storage:
                                  (game_id, pid, name, seat))
             self.con.execute(
                 "UPDATE games SET status='playing', map_id=?, map_name=?, map_json=?, state_json=?, "
-                "turn_deadline_utc=?, updated_utc=? WHERE game_id=?",
+                "turn_deadline_utc=?, started_utc=?, updated_utc=? WHERE game_id=?",
                 (map_row["map_id"], map_row["name"], map_row["json"], json.dumps(snapshot),
-                 deadline, now, game_id))
+                 deadline, now, now, game_id))
+        return now
 
     def save_state(self, game_id: int, snapshot: dict, deadline: Optional[str]):
         self._set(game_id, state_json=json.dumps(snapshot), turn_deadline_utc=deadline)

@@ -16,6 +16,7 @@ from core.bump import should_bump
 from core.errors import TECH_ERROR_TEXT, report_error
 from core.full_games import FullGame
 from core.locks import LockMap
+from core.clock import fmt_duration
 from core.scope import ignore, in_scope
 from .avatars import avatar_url, load_avatars
 from .console import console_jmap
@@ -69,6 +70,7 @@ class Runtime:
     ping_pid: Optional[int] = None      # кому оно адресовано
     minigame_running: bool = False      # идёт ли сейчас мини-игра, запущенная этой партией
     map_key: Optional[int] = None       # хэш карты для кэша картинки (считается один раз)
+    started: Optional[datetime] = None  # когда партия началась (None у партий, начатых до появления этой колонки)
 
 class JumanjiController:
     def __init__(self, bot, storage: Storage):
@@ -149,6 +151,7 @@ class JumanjiController:
                      {r["pid"]: r["name"] for r in rows}, {r["pid"]: r["avatar_url"] for r in rows},
                      g["channel_id"], g["message_id"], bool(g["solo"]))
         rt.ping_id = g["ping_id"]
+        rt.started = datetime.fromisoformat(g["started_utc"]) if g["started_utc"] else None
         return rt
 
     async def _resume(self, rt: Runtime):
@@ -365,11 +368,12 @@ class JumanjiController:
             random.shuffle(players)                                # порядок ходов случайный
             match = Match(track, players)
             events = match.start()
-            self.db.start(game_id, map_row, bots, match.snapshot(), None)
+            started = self.db.start(game_id, map_row, bots, match.snapshot(), None)
 
             names = {r["pid"]: r["name"] for r in humans} | dict(bots)
             avatars = {r["pid"]: r["avatar_url"] for r in humans}
             rt = Runtime(game_id, match, gmap, names, avatars, g["channel_id"], g["message_id"], bool(g["solo"]))
+            rt.started = datetime.fromisoformat(started)
             rt.log.append("🎬 Игра началась!")
             self.rt[game_id] = rt
             await self._after(rt, events)
@@ -680,6 +684,9 @@ class JumanjiController:
         for i, p in enumerate(m.standings):
             place = MEDALS[i] if i < len(MEDALS) else f"{i + 1}."
             lines.append(f"{place} {self._label(rt, p.pid)}" + (" (вышел)" if p.left else ""))
+        if rt.started is not None:
+            took = (self.bot.clock.now() - rt.started).total_seconds()
+            lines += ["", f"⏱ Длительность партии: {fmt_duration(max(0, took))}"]
         lines += ["", "Для новой партии используйте /jumanji."]
         return "\n".join(lines)[:1990]
 
