@@ -1,4 +1,5 @@
 """Правила и константы Джуманджи. Всё, что хочется подкрутить, лежит здесь."""
+from core.players import BOT_IDS
 
 # ---------- Партия ----------
 DICE_SIDES = 6
@@ -6,7 +7,6 @@ MIN_PLAYERS = 2
 MAX_PLAYERS = 5
 MAX_BOTS = 4
 DEFAULT_BOTS = 1
-BOT_IDS = (-101, -102, -103, -104)     # «ID» ботов (у настоящих людей ID положительные; -1 занят манекеном в «Тяни верёвку»)
 TURN_SECONDS = 30                      # время на ход
 TIMEOUTS_TO_LEAVE = 3                  # третий таймаут исключает игрока
 RESET_TIMEOUTS_ON_ROLL = True          # True — считаются таймауты ПОДРЯД; False — за всю партию

@@ -62,8 +62,7 @@ class BoardView(discord.ui.View):
             self.stop()
 
     async def _on_quit(self, interaction: discord.Interaction):
-        if await self.ctrl.rematch_decline(interaction, self.game_id):  # True — связка распущена
-            self.stop()
+        await self.ctrl.rematch_decline(interaction, self.game_id)
 
     async def on_error(self, interaction, error, item):
         if is_expired(error):

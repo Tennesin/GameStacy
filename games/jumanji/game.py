@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 
 from config import DEV_ID
+from core.players import esc
 from core.bump import should_bump
 from core.errors import TECH_ERROR_TEXT, report_error
 from core.full_games import FullGame
@@ -50,9 +51,6 @@ RULES_TEXT = (f"**Правила.** Перед началом все броса�
               "если перешагнули, идёте как обычно.\n"
               f"Пропущенные ходы подряд ({TIMEOUTS_TO_LEAVE}) — вы выбываете. "
               "Партия идёт, пока на карте не останется один игрок.")
-
-def esc(text) -> str:
-    return discord.utils.escape_markdown(discord.utils.escape_mentions(str(text)))
 
 def bot_name(pid: int) -> str:
     """Имя бота по его ID: совпадает с цветом его фишки на картинке."""
@@ -256,16 +254,15 @@ class JumanjiController:
     async def _lobby_refresh(self, interaction: discord.Interaction, game_id: int):
         g = self.db.get(game_id)
         content, view = self._lobby_text(g), self._lobby_view(g)
+        await interaction.response.defer()                   # подтверждаем сразу: should_bump ходит в Discord
 
+        sent_new = False
         if g["message_id"] and await should_bump(self.bot, g["channel_id"], g["message_id"]):
-            await interaction.response.defer()               # подтверждаем нажатие, дальше шлём новое сообщение
             chan = self.bot.get_partial_messageable(g["channel_id"])
             try:
                 new = await chan.send(content, view=view, allowed_mentions=NO_PINGS)
             except discord.HTTPException:
                 log.exception("Не удалось поднять лобби #%s, правлю старое", game_id)
-                await interaction.edit_original_response(content=content, view=view,
-                                                         allowed_mentions=NO_PINGS)
             else:
                 old = g["message_id"]
                 self.db.set_message(game_id, new.id)
@@ -273,9 +270,10 @@ class JumanjiController:
                     await chan.get_partial_message(old).delete()
                 except discord.HTTPException:
                     pass
-        else:
-            await interaction.response.edit_message(content=content, view=view, allowed_mentions=NO_PINGS)
-
+                sent_new = True
+        if not sent_new:
+            await interaction.edit_original_response(content=content, view=view,
+                                                     allowed_mentions=NO_PINGS)
         self._schedule_expiry(game_id, LOBBY_SECONDS)
 
     async def _guard(self, interaction: discord.Interaction, g) -> bool:

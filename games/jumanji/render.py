@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+from core.imaging import font as _font, render_in_thread
 from .models import GameMap, parse_cell_id, side_chains, trace_path
 from .rules import BOT_IDS
 
@@ -52,28 +53,6 @@ BOT_NAMES = ["Фиолетовый бот", "Розовый бот", "Бирюз
 HUMAN_COLORS = [(66, 133, 244), (59, 200, 100), (250, 210, 50), (235, 60, 60), (245, 140, 40)]
 
 DIM_RGB, DIM_ALPHA = 0.45, 0.5       # затемнение фишек, которые делят ячейку с ходящим
-
-# ---------- Шрифт (в картинке только цифры и латиница; кириллица нужна лишь для букв-заглушек) ----------
-_ROOT = Path(__file__).resolve().parents[2]
-_FONT_PATHS = [
-    _ROOT / "assets" / "fonts" / "DejaVuSans-Bold.ttf",
-    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-    Path("C:/Windows/Fonts/arialbd.ttf"),
-    Path("C:/Windows/Fonts/arial.ttf"),
-]
-
-@lru_cache(maxsize=8)
-def _font(size: int):
-    """(шрифт, умеет_ли_кириллицу)."""
-    for p in _FONT_PATHS:
-        try:
-            return ImageFont.truetype(str(p), size), True
-        except OSError:
-            continue
-    try:
-        return ImageFont.load_default(size), False
-    except TypeError:                                         # старая Pillow: размер не поддерживается
-        return ImageFont.load_default(), False
 
 # ---------- Фишки игроков ----------
 
@@ -719,13 +698,7 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     img.convert("RGB").save(buf, "PNG", compress_level=3)
     return buf.getvalue()
 
-_lock: Optional[asyncio.Semaphore] = None
-
 async def render_board_async(m: GameMap, tokens=(), selected: Optional[str] = None,
                              show_grid: bool = False, cache_key: Optional[int] = None) -> bytes:
-    """Рисует в отдельном потоке и не больше одной картинки за раз (на сервере всего 1 ГБ памяти)."""
-    global _lock
-    if _lock is None:
-        _lock = asyncio.Semaphore(1)
-    async with _lock:
-        return await asyncio.to_thread(render_board, m, list(tokens), selected, show_grid, cache_key)
+    """Рисует в отдельном потоке."""
+    return await render_in_thread(render_board, m, list(tokens), selected, show_grid, cache_key)

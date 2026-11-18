@@ -1,5 +1,4 @@
 """Настройки Стейси: .env, пути, часовой пояс, логирование."""
-
 import logging
 import os
 from pathlib import Path
@@ -37,3 +36,5 @@ GAMES = ["games.mini_games", "games.x_o", "games.jumanji"]   # мини-игры
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stacy")
+if not DEV_ID:
+    log.warning("DEV_ID не задан в .env: в сообщении об ошибке не будет тега разработчика.")

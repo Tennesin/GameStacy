@@ -73,10 +73,26 @@ class StacyBot(discord.Client):
         log.info("Стейси остановлена.")
         await super().close()
 
+    @staticmethod
+    def _command_signature(commands) -> list:
+        """Подпись набора команд: имена, описания, параметры, выбор и ограничения (в том числе у групп)."""
+        out = []
+        for c in commands:
+            item = [c.name, c.description, getattr(c, "guild_only", None),
+                    getattr(c, "nsfw", None), str(getattr(c, "default_permissions", None))]
+            for p in getattr(c, "parameters", ()):
+                item.append((p.name, p.description, str(p.type), p.required,
+                             [(ch.name, ch.value) for ch in p.choices],
+                             getattr(p, "min_value", None), getattr(p, "max_value", None)))
+            sub = getattr(c, "commands", None)
+            if sub:
+                item.append(StacyBot._command_signature(sub))
+            out.append(tuple(item))
+        return sorted(out, key=lambda t: t[0])
+
     async def _sync_commands_if_changed(self):
-        """Синхронизирует команды с Discord, только если изменился их набор (имена и описания)."""
-        sig = repr(sorted((c.name, c.description, getattr(c, "guild_only", None))
-                          for c in self.tree.get_commands()))
+        """Синхронизирует команды с Discord, только если изменился их набор (имена, описания, параметры)."""
+        sig = repr(self._command_signature(self.tree.get_commands()))
         digest = hashlib.sha256(sig.encode("utf-8")).hexdigest()
         row = self.db.execute("SELECT value FROM meta WHERE key='tree_digest'").fetchone()
         if row and row[0] == digest:

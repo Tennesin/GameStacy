@@ -60,32 +60,32 @@ class PredictView(discord.ui.View):
         self.game.trace(f"ОШИБКА при прогнозе у {who}: {type(error).__name__}: {error}")
         log.error("Ошибка кнопки прогноза", exc_info=error)
 
-    @discord.ui.button(label="Меньше 5", emoji="⬇️", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label=f"Меньше {THRESHOLD}", emoji="⬇️", style=discord.ButtonStyle.danger)
     async def less_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._pick(interaction, LESS)
 
-    @discord.ui.button(label="Больше 5", emoji="⬆️", style=discord.ButtonStyle.success)
+    @discord.ui.button(label=f"Больше {THRESHOLD}", emoji="⬆️", style=discord.ButtonStyle.success)
     async def more_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._pick(interaction, MORE)
 
 class MoreLessGame(MiniGame):
     key = "highlow"
     title = "Больше или Меньше?"
-    rules = ("Прогнозируйте, какое число выпадет на кубике (1-10): **больше** или **меньше** 5. "
+    rules = (f"Прогнозируйте, какое число выпадет на кубике (1-{DIE_SIDES}): **больше** или **меньше** {THRESHOLD}. "
              "Нажмите одну из двух кнопок под сообщением.\n"
-             "Стейси бросает кубик: кто ошибся, тот выбывает. Если выпало ровно 5, ничего не происходит, "
+             f"Стейси бросает кубик: кто ошибся, тот выбывает. Если выпало ровно {THRESHOLD}, ничего не происходит, "
              "кубик бросается снова с теми же прогнозами. "
              "После каждого броска, который кого-то проверил, выжившие делают новый прогноз "
-             "(15 секунд; кто не успел, выбывает).\n"
+             f"({ROUND_PICK_SECONDS} секунд; кто не успел, выбывает).\n"
              "Побеждает тот, кто останется последним. Если выбыли все, победителей нет.")
 
-    prompt = "🔮 **Ваш прогноз:** выпадет число больше или меньше 5?"
+    prompt = f"🔮 **Ваш прогноз:** выпадет число больше или меньше {THRESHOLD}?"
 
     def pick_label(self, pick) -> str:
-        return "больше 5" if pick == MORE else "меньше 5"
+        return f"больше {THRESHOLD}" if pick == MORE else f"меньше {THRESHOLD}"
 
     def pick_buttons(self) -> list:
-        return [("Меньше 5", LESS), ("Больше 5", MORE)]
+        return [(f"Меньше {THRESHOLD}", LESS), (f"Больше {THRESHOLD}", MORE)]
 
     def _board(self, history: list, alive: set, last, out: set, note: str = "") -> str:
         lines = ["🔮 **Больше или Меньше?**"]
