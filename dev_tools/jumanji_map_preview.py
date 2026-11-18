@@ -12,7 +12,6 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-
 from PIL import Image, ImageDraw, ImageTk
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +24,7 @@ from games.jumanji.models import GameMap, MapFormatError
 from games.jumanji.render import BOT_NAMES, HUMAN_COLORS, make_tokens, render_board
 from games.jumanji.rules import BONUS_LABELS, BOT_IDS, LOG_LINES, MAX_BOTS, MAX_PLAYERS, TIMEOUTS_TO_LEAVE
 from games.jumanji.validator import validate_map
+from games.jumanji.texts import describe as describe_event
 
 MAPS_DIR = ROOT / "maps_export"
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
@@ -373,53 +373,7 @@ class MapPreview:
         self.log = self.log[-LOG_LINES:]
 
     def describe(self, ev):
-        k, d = ev.kind, ev.data
-        n = self.nm(ev.pid) if ev.pid else ""
-        lab = self.track.label
-        if k == "roll":
-            extra = f" ×2 = {d['total']}" if d.get("mult", 1) > 1 else ""
-            return f"🎲 {n}: выпало {d['d']}{extra}"
-        if k == "blocked":
-            return f"⛔ {n}: до финиша {d['left']}, а выпало {d['d']}: остаётся на месте"
-        if k == "move":
-            return f"➡️ {n} идёт на клетку {lab(d['to'])}"
-        if k == "branch":
-            return f"🟡 {n} встаёт на начало особого пути"
-        if k == "rejoin":
-            return f"🟡 {n} сходит с особого пути"
-        if k == "jump":
-            return f"🟢 {n} перепрыгивает на клетку {lab(d['to'])}"
-        if k == "back":
-            return f"🔴 {n} откатывается на клетку {lab(d['to'])}"
-        if k == "reset":
-            return f"⚫ {n} возвращается на старт"
-        if k == "skip_set":
-            return f"🟠 {n} пропустит следующий ход"
-        if k == "skip_used":
-            return f"⏭ {n} пропускает ход"
-        if k == "charge":
-            return f"🔵 {n} бросает ещё раз"
-        if k == "charge_denied":
-            return f"🔵 {n}: лимит дополнительных бросков исчерпан"
-        if k == "bonus_roll":
-            return f"🎲 {n} бросает ещё раз (бонус)"
-        if k == "minigame":
-            return "🟣 Клетка мини-игры! Играют все"
-        if k == "reward":
-            return f"🎁 Награда: {d['title']}"
-        if k == "reward_none":
-            return "🎁 Победителей нет: награды не будет"
-        if k == "reward_move":
-            return f"🎁 {n}: клетка {lab(d['from'])} → {lab(d['to'])}"
-        if k == "bonus_set":
-            return f"🎁 {n}: {BONUS_LABELS.get(d['bonus'], d['bonus'])}"
-        if k == "finished":
-            return f"🏁 {n} финиширует! Место: {d['place']}"
-        if k == "timeout":
-            return f"⏱ {n} не бросил кубик ({d['count']} из {TIMEOUTS_TO_LEAVE})"
-        if k == "left":
-            return f"🚪 {n} покидает игру"
-        return None
+        return describe_event(ev, self.track, self.nm(ev.pid) if ev.pid else "")
 
     # ==================== Показ ====================
 

@@ -30,9 +30,9 @@ def register_commands(bot: "StacyBot"):
 
 class StacyBot(discord.Client):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True          # привилегированный
-        super().__init__(intents=intents)
+        intents = discord.Intents.none()
+        intents.guilds = True
+        super().__init__(intents=intents, max_messages=None)
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = on_tree_error
         self.db = connect(DATA_DIR / "stacy.db", MAIN_MIGRATIONS)

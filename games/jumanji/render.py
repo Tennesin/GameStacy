@@ -447,7 +447,7 @@ def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
 
 # Кэш статичной основы карты: фон, тропа, декор, стрелки, ячейки.
 _BASE_CACHE: OrderedDict = OrderedDict()
-_BASE_CACHE_LIMIT = 2
+_BASE_CACHE_LIMIT = 6
 
 def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
     """Тяжёлая часть: рисует всё, кроме фишек. Возвращает (картинка в SS-размере, центры ячеек, список клеток по индексам)."""
@@ -576,13 +576,29 @@ def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
 
     return img, centers, full
 
+def _shrink_base(built):
+    """(картинка в SS-размере, центры, клетки) -> (основа в ИТОГОВОМ размере, центры в итоговых px, клетки, масштаб f).
+    Тяжёлое уменьшение делается один раз при построении, а не на каждом ходу."""
+    big_img, centers, full = built
+    W, H = big_img.size
+    tw, th = W // SS, H // SS
+    big = max(tw, th)
+    if big > MAX_SIDE:
+        k = MAX_SIDE / big
+        tw, th = max(1, int(tw * k)), max(1, int(th * k))
+    f = tw / W                                    # коэффициент: SS-координаты -> итоговые пиксели
+    small = big_img.resize((tw, th), RESAMPLE)
+    return small, {cid: (x * f, y * f) for cid, (x, y) in centers.items()}, full, f
+
+_SPRITE_HALF = 80 * SS        # половина стороны спрайта клетки: вмещает кольцо фишек, ореол и булавку
+
 def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
-    """PNG-табло. tokens — фишки (make_tokens). Статичная основа берётся из кэша."""
+    """PNG-табло. tokens — фишки (make_tokens). Основа (уже в итоговом размере) берётся из кэша."""
     cacheable = selected is None                              # с выделенной ячейкой (редактор) кэш не нужен
     key = (zlib.crc32(m.to_json().encode("utf-8")), show_grid)
     base = _BASE_CACHE.get(key) if cacheable else None
     if base is None:
-        base = _build_base(m, selected, show_grid)
+        base = _shrink_base(_build_base(m, selected, show_grid))
         if cacheable:
             _BASE_CACHE[key] = base
             while len(_BASE_CACHE) > _BASE_CACHE_LIMIT:
@@ -590,41 +606,39 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
     else:
         _BASE_CACHE.move_to_end(key)
 
-    base_img, centers, full = base
-    img = base_img.copy()                                     # основу не портим: в кэше она должна остаться чистой
-    d = ImageDraw.Draw(img, "RGBA")
-    W, H = img.size
+    small, centers, full, f = base
+    img = small.copy()                                        # основу не портим: в кэше она должна остаться чистой
 
-    # фишки: на одной ячейке несколько — все, кроме ходящего, затемнены
     groups: dict = {}
     for t in tokens:
         if 0 <= t.pos < len(full):
             groups.setdefault(t.pos, []).append(t)
+
+    size = 2 * _SPRITE_HALF
+    side = max(1, round(size * f))
     for pos, group in groups.items():
         cx, cy = centers[full[pos]]
         shared = len(group) > 1
         items = sorted(zip(group, _slots(len(group))), key=lambda it: it[0].current)   # ходящий — сверху
+
+        sprite = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(sprite)
         for tok, (dx, dy, dia) in items:
             tile = _tile(tok, dia, dim=shared and not tok.current)
-            px, py = cx + dx * SS, cy + dy * SS
+            px, py = _SPRITE_HALF + dx * SS, _SPRITE_HALF + dy * SS
             if tok.current:
                 halo = tile.width / 2 + 6 * SS
-                ImageDraw.Draw(img, "RGBA").ellipse((px - halo, py - halo, px + halo, py + halo),
-                                                    fill=(255, 214, 64, 70))
-            img.alpha_composite(tile, (int(px - tile.width / 2), int(py - tile.height / 2)))
+                sd.ellipse((px - halo, py - halo, px + halo, py + halo), fill=(255, 214, 64, 70))
+            sprite.alpha_composite(tile, (int(px - tile.width / 2), int(py - tile.height / 2)))
             if tok.current:                                   # булавка над ходящим
                 top = py - tile.height / 2 - 4 * SS
-                d.polygon([(px, top), (px - 15 * SS, top - 24 * SS), (px + 15 * SS, top - 24 * SS)],
-                          fill=GOLD, outline=(30, 30, 30, 255))
+                sd.polygon([(px, top), (px - 15 * SS, top - 24 * SS), (px + 15 * SS, top - 24 * SS)],
+                           fill=GOLD, outline=(30, 30, 30, 255))
+        sprite = sprite.resize((side, side), RESAMPLE)
+        img.paste(sprite, (round(cx - side / 2), round(cy - side / 2)), sprite)
 
-    tw, th = W // SS, H // SS
-    big = max(tw, th)
-    if big > MAX_SIDE:                                        # большая сетка: сразу уменьшаем до разумного размера
-        k = MAX_SIDE / big
-        tw, th = max(1, int(tw * k)), max(1, int(th * k))
-    out = img.resize((tw, th), RESAMPLE).convert("RGB")
     buf = io.BytesIO()
-    out.save(buf, "PNG", compress_level=3)                    # быстрее сжатие: на слабом процессоре это заметно
+    img.convert("RGB").save(buf, "PNG", compress_level=3)
     return buf.getvalue()
 
 _lock: Optional[asyncio.Semaphore] = None

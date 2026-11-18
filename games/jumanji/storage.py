@@ -141,6 +141,13 @@ class Storage:
             "SELECT * FROM games WHERE message_id IS NOT NULL AND status IN ('lobby', 'playing')"
         ).fetchall()
 
+    def stale(self, cutoff_play: str, cutoff_rematch: str) -> list:
+        """Партии, где давно никто ничего не делал: игра без ходов или реванш без ответа."""
+        return self.con.execute(
+            "SELECT * FROM games WHERE (status='playing' AND updated_utc <= ?) "
+            "OR (status='finished' AND rematch=1 AND updated_utc <= ?)",
+            (cutoff_play, cutoff_rematch)).fetchall()
+
     def set_message(self, game_id: int, message_id: int, channel_id: Optional[int] = None):
         if channel_id is None:
             self._set(game_id, message_id=message_id)

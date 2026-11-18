@@ -5,6 +5,7 @@ import random
 from collections import defaultdict
 from datetime import datetime
 import discord
+from datetime import datetime, timedelta
 from discord import app_commands
 
 from config import LOBBY_TIMEOUT_SECONDS
@@ -16,6 +17,9 @@ from .views import BoardView, LobbyView
 
 log = logging.getLogger("stacy.xo")
 NO_PINGS = discord.AllowedMentions.none()
+PLAY_IDLE_SECONDS = 1800        # партия без ходов закрывается через 30 минут
+REMATCH_IDLE_SECONDS = 600      # реванш без ответа — через 10 минут
+SWEEP_EVERY_SECONDS = 120
 
 def mention(uid) -> str:
     return f"<@{uid}>"
@@ -31,6 +35,9 @@ def render(g, note: str = "") -> str:
     if status == "aborted":
         if g["result"] == "timeout":
             return "\n".join([head, "⌛ Время ожидания вышло: игроки не набрались. Набор закрыт. "
+                                    "Для новой партии используйте /xo."])
+        if g["result"] == "idle":
+            return "\n".join([head, "⌛ Партия закрыта: слишком долго не было ходов. "
                                     "Для новой партии используйте /xo."])
         return "\n".join([head, "⚠️ Партия закрыта."])
 
@@ -87,6 +94,47 @@ class XOController:
             else:                                       # окончена, ждёт ответа про реванш
                 view = BoardView(self, g["game_id"], g["board"], locked=True, rematch=True)
             self.bot.add_view(view, message_id=g["message_id"])
+
+    async def sweep_loop(self):
+        """Раз в пару минут закрывает брошенные партии и неотвеченные реванши."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                await self._sweep()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Сбой уборки брошенных партий")
+            await asyncio.sleep(SWEEP_EVERY_SECONDS)
+
+    async def _sweep(self):
+        now = self.bot.clock.now()
+        cut_play = (now - timedelta(seconds=PLAY_IDLE_SECONDS)).isoformat()
+        cut_rematch = (now - timedelta(seconds=REMATCH_IDLE_SECONDS)).isoformat()
+        for row in self.db.stale(cut_play, cut_rematch):
+            gid = row["game_id"]
+            async with self.locks[gid]:
+                g = self.db.get(gid)                              # за время ожидания блокировки всё могло измениться
+                if g is None:
+                    continue
+                note = ""
+                if g["status"] == "playing" and g["updated_utc"] <= cut_play:
+                    self.db.abort(gid, "idle")
+                elif g["status"] == "finished" and g["rematch"] == 1 and g["updated_utc"] <= cut_rematch:
+                    self.db.set_rematch(gid, 2)
+                    note = "⌛ Реванш не состоялся: ответа не дождались."
+                else:
+                    continue
+                g = self.db.get(gid)
+                if not g["message_id"]:
+                    continue
+                try:
+                    msg = self.bot.get_partial_messageable(g["channel_id"]).get_partial_message(g["message_id"])
+                    # доска остаётся на экране (кнопки заблокированы), чтобы был виден итог
+                    await msg.edit(content=render(g, note),
+                                   view=BoardView(self, gid, g["board"], locked=True))
+                except discord.HTTPException:
+                    log.exception("Не удалось обновить сообщение закрытой партии #%s", gid)
 
     # ---------- Показ сообщения партии (правка или подъём вниз канала) ----------
 
@@ -305,6 +353,7 @@ def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = XOController(bot, Storage(bot.clock))
     ctrl.restore_views()
+    ctrl.sweep_task = asyncio.create_task(ctrl.sweep_loop())
 
     @app_commands.command(name="xo", description="Крестики-нолики: открыть набор на партию")
     @app_commands.guild_only()

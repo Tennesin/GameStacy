@@ -27,6 +27,7 @@ from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG
 from .storage import Storage
 from .validator import validate_map
 from .views import ConfirmLeaveView, LobbyView, PlayView
+from .texts import describe
 
 log = logging.getLogger("stacy.jumanji")
 
@@ -66,6 +67,7 @@ class Runtime:
     log: list = field(default_factory=list)
     ping_id: Optional[int] = None       # сообщение «ваш ход» с настоящим тегом
     ping_pid: Optional[int] = None      # кому оно адресовано
+    minigame_running: bool = False      # идёт ли сейчас мини-игра, запущенная этой партией
 
 class JumanjiController:
     def __init__(self, bot, storage: Storage):
@@ -506,6 +508,7 @@ class JumanjiController:
         if not bump:                                    # после мини-игры bump уже True; иначе смотрим на канал
             bump = await should_bump(self.bot, rt.channel_id, rt.message_id)
         if m.over:
+            self._stop_minigame(rt)
             self._cancel(rt)
             rt.deadline = None
             self.db.finish(rt.game_id, m.snapshot())
@@ -579,12 +582,15 @@ class JumanjiController:
             if minis is not None and minis.games and humans:
                 channel = self.bot.get_channel(rt.channel_id) or await self.bot.fetch_channel(rt.channel_id)
                 key = random.choice(list(minis.games))
+                rt.minigame_running = True
                 try:
                     result = await minis.play(key, channel, players=humans,
                                               pick_seconds=MINI_PICK_SECONDS, bots=bots)
                     winners = list(result.winners)
                 except (KeyError, RuntimeError) as e:
                     log.warning("Мини-игра в партии #%s не запустилась: %s", rt.game_id, e)
+                finally:
+                    rt.minigame_running = False
             async with self.locks[rt.game_id]:
                 if rt.game_id not in self.rt or not m.awaiting_minigame:
                     return
@@ -594,6 +600,12 @@ class JumanjiController:
         except Exception:
             log.exception("Сбой мини-игры в партии #%s", rt.game_id)
             await self._fail_silent(rt)
+
+    def _stop_minigame(self, rt: Runtime):
+        """Останавливает мини-игру партии (если идёт): партия закончилась или закрыта."""
+        minis = getattr(self.bot, "mini_games", None)
+        if rt.minigame_running and minis is not None:
+            minis.stop(rt.channel_id)
 
     # ==================== Табло ====================
 
@@ -658,56 +670,8 @@ class JumanjiController:
         return f"{HUMAN_EMOJI[seat % len(HUMAN_EMOJI)]} {esc(rt.names.get(pid, pid))}"
 
     def _describe(self, rt: Runtime, ev) -> Optional[str]:
-        k, d = ev.kind, ev.data
-        n = self._label(rt, ev.pid) if ev.pid else ""
-        lab = rt.match.track.label                                 # подпись клетки: «12» или «12.3» на дороге
-        if k == "roll":
-            extra = f" ×2 = **{d['total']}**" if d.get("mult", 1) > 1 else ""
-            return f"🎲 {n}: выпало **{d['d']}**{extra}"
-        if k == "blocked":
-            return f"⛔ {n}: до финиша {d['left']}, а выпало {d['d']} — остаётся на месте"
-        if k == "move":
-            return f"➡️ {n} идёт на клетку {lab(d['to'])}"
-        if k == "branch":
-            return f"🟡 {n} встаёт на начало особого пути: следующий ход пойдёт по нему"
-        if k == "rejoin":
-            return f"🟡 {n} сходит с особого пути"
-        if k == "jump":
-            return f"🟢 {n} перепрыгивает на клетку {lab(d['to'])}"
-        if k == "back":
-            return f"🔴 {n} откатывается на клетку {lab(d['to'])}"
-        if k == "reset":
-            return f"⚫ {n} возвращается на старт"
-        if k == "skip_set":
-            return f"🟠 {n} пропустит следующий ход"
-        if k == "skip_used":
-            return f"⏭ {n} пропускает ход"
-        if k == "charge":
-            return f"🔵 {n} бросает ещё раз"
-        if k == "charge_denied":
-            return f"🔵 {n}: лимит дополнительных бросков исчерпан"
-        if k == "bonus_roll":
-            return f"🎲 {n} бросает ещё раз (бонус)"
-        if k == "minigame":
-            return "🟣 Клетка мини-игры! Играют все"
-        if k == "reward":
-            return f"🎁 Награда: {d['title']}"
-        if k == "reward_none":
-            return "🎁 Победителей нет: награды не будет"
-        if k == "reward_move":
-            return f"🎁 {n}: клетка {lab(d['from'])} → {lab(d['to'])}"
-        if k == "bonus_set":
-            return f"🎁 {n}: {BONUS_LABELS.get(d['bonus'], d['bonus'])}"
-        if k == "finished":
-            return f"🏁 {n} финиширует! Место: {d['place']}"
-        if k == "timeout":
-            return f"⏱ {n} не бросил кубик ({d['count']} из {TIMEOUTS_TO_LEAVE})"
-        if k == "left":
-            return (f"⏱ {n} выбывает: слишком много пропущенных ходов" if d.get("reason") == "timeout"
-                    else f"🚪 {n} покидает игру")
-        if k == "joined":
-            return f"➕ {n} присоединяется к игре"
-        return None                                                # turn, game_over: отдельных строк нет
+        who = self._label(rt, ev.pid) if ev.pid else ""
+        return describe(ev, rt.match.track, who, bold=lambda v: f"**{v}**")
 
     def _log(self, rt: Runtime, events: list):
         rt.log += [t for t in (self._describe(rt, e) for e in events) if t]
@@ -804,14 +768,16 @@ class JumanjiController:
         rt = self.rt.pop(game_id, None)
         if rt is not None:
             self._cancel(rt)
+            await self._drop_ping(rt)
+        self._stop_minigame(rt)
         self._cancel_lobby_timer(game_id)
         self.db.abort(game_id, "error")
-        await self._drop_ping(rt)
         await report_error(interaction, error, closing_text="⚠️ Партия закрыта из-за технической ошибки.")
 
     async def _fail_silent(self, rt: Runtime):
         """То же для сбоя без взаимодействия (таймер, мини-игра)."""
         self._cancel(rt)
+        self._stop_minigame(rt)
         self.rt.pop(rt.game_id, None)
         self.db.abort(rt.game_id, "error")
         await self._drop_ping(rt)
@@ -849,7 +815,7 @@ def _console_jmap(ctrl: JumanjiController):
             except (OSError, MapFormatError) as e:
                 print(f"⚠ Не удалось прочитать карту: {e}", flush=True)
                 return
-            rep = validate_map(gmap)
+            rep = await asyncio.to_thread(validate_map, gmap)
             print(rep.text(), flush=True)
             if rep.ok:
                 map_id = ctrl.db.export_map(gmap.name, gmap.to_json())
@@ -866,6 +832,9 @@ def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = JumanjiController(bot, Storage(bot.clock))
     ctrl.restore_views()
+    removed = ctrl.db.purge(30)
+    if removed:
+        log.info("Джуманджи: удалено старых партий: %d", removed)
     bot.full_games["jumanji"] = FullGame("jumanji", "Джуманджи", ctrl.launch)
     bot.console_commands["-jmap"] = _console_jmap(ctrl)
 

@@ -84,7 +84,6 @@ def test_bonuses():
     print("бонусы наград: OK")
 
 def test_editor_helpers():
-    from .editor import initial_tail, parse_cells, place_cells, remove_cell
     m = GameMap(name="T", width=10, height=8)
 
     ids, err = parse_cells("a1-c1 C2, а3", m)            # последняя «а» русская
