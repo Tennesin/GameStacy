@@ -18,7 +18,6 @@ GAMES_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 DEV_ID = int(os.environ.get("DEV_ID") or 0)
-DEV_GUILD_ID = int(os.environ.get("DEV_GUILD_ID") or 0)
 
 # Игровые сутки привязаны к Ташкенту
 TZ_NAME = "Asia/Tashkent"

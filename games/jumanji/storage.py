@@ -72,10 +72,13 @@ MIGRATIONS = [
     """
     ALTER TABLE editor_sessions ADD COLUMN jitter_seed INTEGER;   -- зерно предпросмотра экспорта; NULL — предпросмотра нет
     """,
+    """
+    ALTER TABLE games ADD COLUMN ping_id INTEGER;   -- сообщение «ваш ход» с тегом: после перезапуска его нужно удалить
+    """,
 ]
 
 _GAME_FIELDS = {"channel_id", "home_channel_id", "message_id", "host_id", "status", "solo", "bots", "map_id",
-                "map_name", "map_json", "state_json", "turn_deadline_utc", "result"}
+                "map_name", "map_json", "state_json", "turn_deadline_utc", "result", "ping_id"}
 
 class Storage:
     def __init__(self, clock, path: Optional[Path] = None):
@@ -141,13 +144,6 @@ class Storage:
             "SELECT * FROM games WHERE message_id IS NOT NULL AND status IN ('lobby', 'playing')"
         ).fetchall()
 
-    def stale(self, cutoff_play: str, cutoff_rematch: str) -> list:
-        """Партии, где давно никто ничего не делал: игра без ходов или реванш без ответа."""
-        return self.con.execute(
-            "SELECT * FROM games WHERE (status='playing' AND updated_utc <= ?) "
-            "OR (status='finished' AND rematch=1 AND updated_utc <= ?)",
-            (cutoff_play, cutoff_rematch)).fetchall()
-
     def set_message(self, game_id: int, message_id: int, channel_id: Optional[int] = None):
         if channel_id is None:
             self._set(game_id, message_id=message_id)
@@ -156,6 +152,9 @@ class Storage:
 
     def set_host(self, game_id: int, host_id: int):
         self._set(game_id, host_id=host_id)
+
+    def set_ping(self, game_id: int, message_id: Optional[int]):
+        self._set(game_id, ping_id=message_id)
 
     def update_settings(self, game_id: int, solo: Optional[bool] = None,
                         bots: Optional[int] = None, map_id: Optional[int] = None):
@@ -184,13 +183,19 @@ class Storage:
                                     (game_id,)).fetchone()[0]
             cur = self.con.execute("INSERT OR IGNORE INTO game_players VALUES (?, ?, ?, ?, ?, ?)",
                                    (game_id, pid, name, avatar_url or "", int(is_bot), seat))
-        return cur.rowcount > 0
+            added = cur.rowcount > 0
+            if added:
+                self.con.execute("UPDATE games SET updated_utc=? WHERE game_id=?", (self._now(), game_id))
+        return added
 
     def remove_player(self, game_id: int, pid: int) -> bool:
         """Для выхода из лобби. Из идущей партии игроки не удаляются: они остаются в Match как вышедшие."""
         with self.con:
             cur = self.con.execute("DELETE FROM game_players WHERE game_id=? AND pid=?", (game_id, pid))
-        return cur.rowcount > 0
+            removed = cur.rowcount > 0
+            if removed:
+                self.con.execute("UPDATE games SET updated_utc=? WHERE game_id=?", (self._now(), game_id))
+        return removed
 
     def update_player(self, game_id: int, pid: int, name: str, avatar_url: str):
         """Обновить ник и аватарку (человек мог их сменить)."""

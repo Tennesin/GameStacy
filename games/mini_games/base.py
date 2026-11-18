@@ -148,13 +148,6 @@ class MiniGame:
             return f"**{self.nm(uid)}**"
         return f"<@{uid}>"
 
-    def parse_pick(self, text: str):
-        """Оставлено для совместимости: разбор числа из текста (кнопки им не пользуются)."""
-        t = text.strip()
-        if t.isdigit() and self.pick_min <= int(t) <= self.pick_max:
-            return int(t)
-        return None
-
     async def pause(self):
         await asyncio.sleep(self.roll_delay)
 

@@ -288,7 +288,7 @@ class MapPreview:
         p = self.match.get(pid)
         if p is not None and p.is_bot:
             return p.name
-        seat = self.seat_of(pid)
+        seat = p.color if (p is not None and p.color >= 0) else self.seat_of(pid)
         color = COLOR_NAMES[seat] if seat < len(COLOR_NAMES) else f"цвет {seat + 1}"
         return f"{color}: {p.name if p else pid}"
 
@@ -419,7 +419,7 @@ class MapPreview:
             if mode == AVATAR_MODES[2]:
                 out[p.pid] = fake_avatar((128, 128, 128))
             else:
-                out[p.pid] = fake_avatar(FAKE_AVATARS[self.seat_of(p.pid) % len(FAKE_AVATARS)])
+                out[p.pid] = fake_avatar(FAKE_AVATARS[p.color % len(FAKE_AVATARS)])
         return out
 
     def refresh(self, first_report: str = ""):

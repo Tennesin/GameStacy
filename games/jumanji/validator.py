@@ -196,6 +196,34 @@ def validate_map(m: GameMap, runs: int = SIM_RUNS) -> Report:
     _analyze(track, r, runs)
     return r
 
+def _simulate(track: Track, runs: int) -> tuple:
+    """Одиночные партии без мини-игр."""
+    rng = random.Random(SIM_SEED)
+    turns, capped = [], 0
+    for _ in range(runs):
+        pos, com, n, done = 0, False, 0, False
+        while n < SIM_MAX_TURNS and not done:
+            n += 1
+            extra = 0
+            while True:
+                s = roll_outcome(track, pos, rng.randint(1, DICE_SIDES), com)
+                if not s.blocked:
+                    pos, com = s.end, s.entered
+                if s.finished:
+                    done = True
+                    break
+                if s.effect == "skip":
+                    n += 1                                   # пропущенный ход
+                if s.effect == "charge" and extra < MAX_EXTRA_ROLLS:
+                    extra += 1
+                    continue
+                break
+        if done:
+            turns.append(n)
+        else:
+            capped += 1
+    return turns, capped
+
 def _analyze(track: Track, r: Report, runs: int):
     """Граф состояний (клетка, заход на особый путь) и моделирование одиночных партий."""
     err, warn = r.errors.append, r.warnings.append
@@ -270,31 +298,7 @@ def _analyze(track: Track, r: Report, runs: int):
     if dead:
         warn(f"На эти ячейки с эффектами нельзя попасть броском кубика: {_many(dead)}.")
 
-    rng = random.Random(SIM_SEED)
-    turns, capped = [], 0
-    for _ in range(runs):
-        pos, com, n, done = 0, False, 0, False
-        while n < SIM_MAX_TURNS and not done:
-            n += 1
-            extra = 0
-            while True:
-                s = roll_outcome(track, pos, rng.randint(1, DICE_SIDES), com)
-                if not s.blocked:
-                    pos, com = s.end, s.entered
-                if s.finished:
-                    done = True
-                    break
-                if s.effect == "skip":
-                    n += 1                                   # пропущенный ход
-                if s.effect == "charge" and extra < MAX_EXTRA_ROLLS:
-                    extra += 1
-                    continue
-                break
-        if done:
-            turns.append(n)
-        else:
-            capped += 1
-
+    turns, capped = _simulate(track, runs)
     share = capped / runs
     if share >= SIM_FAIL_SHARE:
         err(f"Карта практически непроходима: {share * 100:.0f}% тестовых партий не дошли до финиша "

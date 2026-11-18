@@ -1,5 +1,5 @@
 """GameStacy: запуск бота, часы, подключение игр и корректная остановка."""
-
+import hashlib
 import asyncio
 import importlib
 import discord
@@ -53,8 +53,7 @@ class StacyBot(discord.Client):
             log.info("Игра подключена: %s", module)
 
         # Глобальные команды: видны на всех серверах, где есть бот
-        await self.tree.sync()
-        log.info("Команды синхронизированы глобально (на новых серверах могут появиться не сразу)")
+        await self._sync_commands_if_changed()
 
     async def _clock_loop(self):
         while True:
@@ -73,6 +72,21 @@ class StacyBot(discord.Client):
         self.clock.save_seen()                                  # момент остановки для следующего запуска
         log.info("Стейси остановлена.")
         await super().close()
+
+    async def _sync_commands_if_changed(self):
+        """Синхронизирует команды с Discord, только если изменился их набор (имена и описания)."""
+        sig = repr(sorted((c.name, c.description, getattr(c, "guild_only", None))
+                          for c in self.tree.get_commands()))
+        digest = hashlib.sha256(sig.encode("utf-8")).hexdigest()
+        row = self.db.execute("SELECT value FROM meta WHERE key='tree_digest'").fetchone()
+        if row and row[0] == digest:
+            log.info("Набор команд не менялся: синхронизация пропущена")
+            return
+        await self.tree.sync()
+        with self.db:
+            self.db.execute("INSERT INTO meta VALUES ('tree_digest', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (digest,))
+        log.info("Команды синхронизированы глобально (на новых серверах могут появиться не сразу)")
 
 if __name__ == "__main__":
     if not TOKEN:

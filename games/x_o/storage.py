@@ -1,4 +1,5 @@
 """Собственная БД игры: data/games/x_o.db. Состояние пишется после каждого действия."""
+from datetime import timedelta
 
 from config import GAMES_DATA_DIR
 from core.db import connect
@@ -66,6 +67,25 @@ class Storage:
             "SELECT * FROM games WHERE message_id IS NOT NULL AND "
             "(status IN ('lobby', 'playing') OR (status = 'finished' AND rematch = 1))"
         ).fetchall()
+
+    def stale(self, cutoff_play: str, cutoff_rematch: str) -> list:
+        """Партии, где давно никто ничего не делал: игра без ходов или реванш без ответа."""
+        return self.con.execute(
+            "SELECT * FROM games WHERE (status='playing' AND updated_utc <= ?) "
+            "OR (status='finished' AND rematch=1 AND updated_utc <= ?)",
+            (cutoff_play, cutoff_rematch)).fetchall()
+
+    def purge(self, days: int = 30) -> int:
+        """Удаляет завершённые и закрытые партии (с их ходами) старше N дней. Возвращает их число."""
+        cutoff = (self.clock.now() - timedelta(days=days)).isoformat()
+        with self.con:
+            ids = [r[0] for r in self.con.execute(
+                "SELECT game_id FROM games WHERE status IN ('finished', 'aborted') AND updated_utc <= ?",
+                (cutoff,))]
+            for gid in ids:
+                self.con.execute("DELETE FROM moves WHERE game_id=?", (gid,))
+                self.con.execute("DELETE FROM games WHERE game_id=?", (gid,))
+        return len(ids)
 
     def set_message(self, game_id: int, message_id: int):
         self._set(game_id, message_id=message_id)

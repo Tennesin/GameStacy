@@ -1,8 +1,10 @@
 """Мини-игра «Больше или Меньше?»: прогноз делается кнопками."""
 import asyncio
 from contextlib import suppress
-
+import logging
 import discord
+
+log = logging.getLogger("stacy.mini")
 
 from .base import MiniGame
 
@@ -56,6 +58,7 @@ class PredictView(discord.ui.View):
     async def on_error(self, interaction, error, item):
         who = f"{interaction.user.display_name} ({interaction.user.id})"
         self.game.trace(f"ОШИБКА при прогнозе у {who}: {type(error).__name__}: {error}")
+        log.error("Ошибка кнопки прогноза", exc_info=error)
 
     @discord.ui.button(label="Меньше 5", emoji="⬇️", style=discord.ButtonStyle.danger)
     async def less_button(self, interaction: discord.Interaction, button: discord.ui.Button):

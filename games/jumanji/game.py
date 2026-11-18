@@ -4,10 +4,8 @@ import io
 import logging
 import random
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -17,17 +15,18 @@ from config import DEV_ID
 from core.bump import should_bump
 from core.errors import TECH_ERROR_TEXT, report_error
 from core.full_games import FullGame
+from core.locks import LockMap
 from core.scope import ignore, in_scope
 from .avatars import avatar_url, load_avatars
+from .console import console_jmap
 from .logic import Match, Player, Track, effective_bots
 from .models import GameMap, MapFormatError
-from .render import BOT_NAMES, make_tokens, render_board_async
+from .render import BOT_NAMES, make_tokens, map_key, render_board_async
 from .rules import (BONUS_LABELS, BOT_DELAY_SECONDS, BOT_IDS, LOBBY_SECONDS, LOG_LINES, MAX_PLAYERS,
-                    MIN_PLAYERS, MINI_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
+                    MIN_PLAYERS, MINI_GAME_PICK_SECONDS, TIMEOUTS_TO_LEAVE, TURN_SECONDS)
 from .storage import Storage
-from .validator import validate_map
-from .views import ConfirmLeaveView, LobbyView, PlayView
 from .texts import describe
+from .views import ConfirmLeaveView, LobbyView, PlayView
 
 log = logging.getLogger("stacy.jumanji")
 
@@ -35,13 +34,14 @@ NO_PINGS = discord.AllowedMentions.none()
 MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
 HUMAN_EMOJI = ["🔵", "🟢", "🟡", "🔴", "🟠"]       # порядок как у HUMAN_COLORS в render.py
 BOT_EMOJI = ["🟣", "🩷", "🩵", "🟤"]               # порядок как у BOT_COLORS
-RULES_TEXT = ("**Правила.** Бросайте кубик по очереди (на ход 30 секунд) и идите к финишу. "
+RULES_TEXT = (f"**Правила.** Бросайте кубик по очереди (на ход {TURN_SECONDS} секунд) и идите к финишу. "
               "Если до финиша осталось меньше, чем выпало, вы остаётесь на месте: финиш берётся точным броском.\n"
               "Цветные клетки: 🟢 прыжок вперёд, 🔴 откат, 🟠 пропуск хода, 🔵 ещё бросок, "
               "🟣 мини-игра для всех, ⚫ возврат на старт, "
               "🟡 особый путь: если встали на неё точным броском, дальше идёте по жёлтой дороге до её конца; "
               "если перешагнули, идёте как обычно.\n"
-              "Три пропущенных хода подряд — вы выбываете. Партия идёт, пока на карте не останется один игрок.")
+              f"Пропущенные ходы подряд ({TIMEOUTS_TO_LEAVE}) — вы выбываете. "
+              "Партия идёт, пока на карте не останется один игрок.")
 
 def esc(text) -> str:
     return discord.utils.escape_markdown(discord.utils.escape_mentions(str(text)))
@@ -68,12 +68,13 @@ class Runtime:
     ping_id: Optional[int] = None       # сообщение «ваш ход» с настоящим тегом
     ping_pid: Optional[int] = None      # кому оно адресовано
     minigame_running: bool = False      # идёт ли сейчас мини-игра, запущенная этой партией
+    map_key: Optional[int] = None       # хэш карты для кэша картинки (считается один раз)
 
 class JumanjiController:
     def __init__(self, bot, storage: Storage):
         self.bot = bot
         self.db = storage
-        self.locks = defaultdict(asyncio.Lock)
+        self.locks = LockMap()
         self.rt: dict = {}                  # game_id -> Runtime идущих партий
         self.lobby_timers: dict = {}
         self.bg: set = set()
@@ -94,9 +95,13 @@ class JumanjiController:
                                       map_id=self._default_map_id())
         self.db.add_player(game_id, user.id, user.display_name, avatar_url(user))
         g = self.db.get(game_id)
-        await interaction.response.send_message(self._lobby_text(g), view=self._lobby_view(g),
-                                                allowed_mentions=NO_PINGS)
-        msg = await interaction.original_response()
+        try:
+            await interaction.response.send_message(self._lobby_text(g), view=self._lobby_view(g),
+                                                    allowed_mentions=NO_PINGS)
+            msg = await interaction.original_response()
+        except discord.HTTPException:
+            self.db.abort(game_id, "error")
+            raise
         self.db.set_message(game_id, msg.id)
         self._schedule_expiry(game_id, LOBBY_SECONDS)
 
@@ -140,14 +145,17 @@ class JumanjiController:
         except Exception:
             log.exception("Не удалось восстановить партию #%s", g["game_id"])
             return None
-        return Runtime(g["game_id"], match, gmap,
-                       {r["pid"]: r["name"] for r in rows}, {r["pid"]: r["avatar_url"] for r in rows},
-                       g["channel_id"], g["message_id"], bool(g["solo"]))
+        rt = Runtime(g["game_id"], match, gmap,
+                     {r["pid"]: r["name"] for r in rows}, {r["pid"]: r["avatar_url"] for r in rows},
+                     g["channel_id"], g["message_id"], bool(g["solo"]))
+        rt.ping_id = g["ping_id"]
+        return rt
 
     async def _resume(self, rt: Runtime):
         await self.bot.wait_until_ready()
         try:
             async with self.locks[rt.game_id]:
+                await self._drop_ping(rt)
                 events = rt.match.finish_minigame([]) if rt.match.awaiting_minigame else []
                 rt.log.append("🔄 Бот перезапускался: игра продолжается.")
                 await self._after(rt, events)
@@ -178,6 +186,7 @@ class JumanjiController:
             f"Карта: **{esc(mp['name']) if mp else 'не выбрана'}**",
             f"Игроки: {people}",
             f"Боты: {bots} (мест занято {len(rows) + n_bots} из {MAX_PLAYERS})",
+            "ℹ️ Число ботов выбирается для игры в одиночку: каждый присоединившийся человек вытесняет одного бота.",
         ]
         if g["home_channel_id"]:
             lines.append(f"📍 Играть можно только в <#{g['home_channel_id']}> и его ветках.")
@@ -540,6 +549,20 @@ class JumanjiController:
         self.bg.add(t)
         t.add_done_callback(self.bg.discard)
 
+    async def purge_loop(self):
+        """Раз в сутки удаляет завершённые и закрытые партии старше 30 дней."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                removed = self.db.purge(30)
+                if removed:
+                    log.info("Джуманджи: удалено старых партий: %d", removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Сбой уборки старых партий")
+            await asyncio.sleep(86400)
+
     def _arm(self, rt: Runtime):
         """Запускает таймер хода: у человека 30 секунд, у бота короткая пауза и автоматический бросок."""
         self._cancel(rt)
@@ -585,10 +608,11 @@ class JumanjiController:
                 rt.minigame_running = True
                 try:
                     result = await minis.play(key, channel, players=humans,
-                                              pick_seconds=MINI_PICK_SECONDS, bots=bots)
+                                              pick_seconds=MINI_GAME_PICK_SECONDS, bots=bots)
                     winners = list(result.winners)
                 except (KeyError, RuntimeError) as e:
                     log.warning("Мини-игра в партии #%s не запустилась: %s", rt.game_id, e)
+                    rt.log.append("⚠️ Мини-игра не началась: в канале уже идёт другая игра.")
                 finally:
                     rt.minigame_running = False
             async with self.locks[rt.game_id]:
@@ -621,11 +645,13 @@ class JumanjiController:
 
     async def _drop_ping(self, rt: Runtime):
         mid, rt.ping_id, rt.ping_pid = rt.ping_id, None, None
-        if mid:
-            try:
-                await self.bot.get_partial_messageable(rt.channel_id).get_partial_message(mid).delete()
-            except discord.HTTPException:
-                pass
+        if not mid:
+            return
+        self.db.set_ping(rt.game_id, None)
+        try:
+            await self.bot.get_partial_messageable(rt.channel_id).get_partial_message(mid).delete()
+        except discord.HTTPException:
+            pass
 
     async def _sync_ping(self, rt: Runtime, reset: bool = False):
         """Отдельное сообщение с настоящим тегом, когда ход переходит к человеку.
@@ -643,6 +669,7 @@ class JumanjiController:
                 f"🎲 <@{want}>, ваш ход! Нажмите «Бросить кубик» (на ход {TURN_SECONDS} с).",
                 allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=want)]))
             rt.ping_id, rt.ping_pid = msg.id, want
+            self.db.set_ping(rt.game_id, msg.id)
         except discord.HTTPException:
             log.exception("Не удалось прислать сообщение о ходе (партия #%s)", rt.game_id)
 
@@ -666,8 +693,9 @@ class JumanjiController:
     def _label(self, rt: Runtime, pid: int) -> str:
         if pid in BOT_IDS:
             return f"{BOT_EMOJI[BOT_IDS.index(pid)]} {bot_name(pid)}"
-        seat = next((i for i, p in enumerate(rt.match.players) if p.pid == pid), 0)
-        return f"{HUMAN_EMOJI[seat % len(HUMAN_EMOJI)]} {esc(rt.names.get(pid, pid))}"
+        p = rt.match.get(pid)
+        color = p.color if (p is not None and p.color >= 0) else 0
+        return f"{HUMAN_EMOJI[color % len(HUMAN_EMOJI)]} {esc(rt.names.get(pid, pid))}"
 
     def _describe(self, rt: Runtime, ev) -> Optional[str]:
         who = self._label(rt, ev.pid) if ev.pid else ""
@@ -726,7 +754,9 @@ class JumanjiController:
         try:
             urls = {p.pid: rt.avatars.get(p.pid, "") for p in m.players if p.on_map and not p.is_bot}
             avatars = await load_avatars(urls)
-            png = await render_board_async(rt.gmap, make_tokens(m, avatars))
+            if rt.map_key is None:
+                rt.map_key = map_key(rt.gmap)
+            png = await render_board_async(rt.gmap, make_tokens(m, avatars), cache_key=rt.map_key)
         except Exception:
             log.exception("Не удалось нарисовать табло партии #%s", rt.game_id)
         content = self._board_text(rt)
@@ -768,8 +798,8 @@ class JumanjiController:
         rt = self.rt.pop(game_id, None)
         if rt is not None:
             self._cancel(rt)
+            self._stop_minigame(rt)
             await self._drop_ping(rt)
-        self._stop_minigame(rt)
         self._cancel_lobby_timer(game_id)
         self.db.abort(game_id, "error")
         await report_error(interaction, error, closing_text="⚠️ Партия закрыта из-за технической ошибки.")
@@ -789,54 +819,15 @@ class JumanjiController:
         except discord.HTTPException:
             log.exception("Не удалось сообщить о сбое партии #%s", rt.game_id)
 
-# ==================== Консоль: карты ====================
-
-JMAP_USAGE = ("Использование:\n"
-              "  -jmap list                   список готовых карт\n"
-              "  -jmap import ПУТЬ_К_JSON     проверить карту и добавить в список для игроков\n"
-              "                               (путь в кавычках или с прямыми слэшами)\n"
-              "  -jmap delete ID_карты        удалить готовую карту из списка")
-
-def _console_jmap(ctrl: JumanjiController):
-    async def handler(bot, args: list):
-        if not args:
-            print(JMAP_USAGE, flush=True)
-            return
-        sub = args[0].lower()
-        if sub == "list":
-            rows = ctrl.db.list_maps()
-            for r in rows:
-                print(f"  {r['map_id']:<4} {r['name']}", flush=True)
-            print(f"Карт: {len(rows)}", flush=True)
-        elif sub == "import" and len(args) >= 2:
-            path = Path(" ".join(args[1:]).strip('"'))
-            try:
-                gmap = GameMap.from_json(path.read_text(encoding="utf-8"))
-            except (OSError, MapFormatError) as e:
-                print(f"⚠ Не удалось прочитать карту: {e}", flush=True)
-                return
-            rep = await asyncio.to_thread(validate_map, gmap)
-            print(rep.text(), flush=True)
-            if rep.ok:
-                map_id = ctrl.db.export_map(gmap.name, gmap.to_json())
-                print(f"✔ Карта «{gmap.name}» добавлена (ID {map_id}).", flush=True)
-        elif sub == "delete" and len(args) >= 2 and args[1].isdigit():
-            print("✔ Удалена." if ctrl.db.delete_map(int(args[1])) else "⚠ Такой карты нет.", flush=True)
-        else:
-            print(JMAP_USAGE, flush=True)
-    return handler
-
 # ==================== Точка входа ====================
 
 def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = JumanjiController(bot, Storage(bot.clock))
     ctrl.restore_views()
-    removed = ctrl.db.purge(30)
-    if removed:
-        log.info("Джуманджи: удалено старых партий: %d", removed)
+    ctrl.purge_task = asyncio.create_task(ctrl.purge_loop())
     bot.full_games["jumanji"] = FullGame("jumanji", "Джуманджи", ctrl.launch)
-    bot.console_commands["-jmap"] = _console_jmap(ctrl)
+    bot.console_commands["-jmap"] = console_jmap(ctrl)
 
     @app_commands.command(name="jumanji", description="Джуманджи: открыть набор на партию")
     @app_commands.guild_only()

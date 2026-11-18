@@ -2,15 +2,15 @@
 import asyncio
 import logging
 import random
-from collections import defaultdict
-from datetime import datetime
-import discord
 from datetime import datetime, timedelta
+
+import discord
 from discord import app_commands
 
 from config import LOBBY_TIMEOUT_SECONDS
 from core.bump import should_bump
 from core.errors import report_error
+from core.locks import LockMap
 from .logic import MARKS, find_win, is_full
 from .storage import Storage
 from .views import BoardView, LobbyView
@@ -20,6 +20,7 @@ NO_PINGS = discord.AllowedMentions.none()
 PLAY_IDLE_SECONDS = 1800        # партия без ходов закрывается через 30 минут
 REMATCH_IDLE_SECONDS = 600      # реванш без ответа — через 10 минут
 SWEEP_EVERY_SECONDS = 120
+PURGE_EVERY_TICKS = 86400 // SWEEP_EVERY_SECONDS      # уборка старых партий раз в сутки
 
 def mention(uid) -> str:
     return f"<@{uid}>"
@@ -64,7 +65,7 @@ class XOController:
         self.bot = bot
         self.db = storage
         self.lobby_timeout = lobby_timeout or LOBBY_TIMEOUT_SECONDS   # сколько ждём второго игрока, сек
-        self.locks = defaultdict(asyncio.Lock)      # по блокировке на партию: клики не обгоняют друг друга
+        self.locks = LockMap()                      # по блокировке на партию: клики не обгоняют друг друга
         self.timers: dict = {}                      # game_id -> задача таймера набора
         self.lobby_views: dict = {}                 # game_id -> View набора (чтобы остановить при закрытии)
 
@@ -96,15 +97,21 @@ class XOController:
             self.bot.add_view(view, message_id=g["message_id"])
 
     async def sweep_loop(self):
-        """Раз в пару минут закрывает брошенные партии и неотвеченные реванши."""
+        """Раз в пару минут закрывает брошенные партии и неотвеченные реванши; раз в сутки чистит старые."""
         await self.bot.wait_until_ready()
+        tick = 0
         while True:
             try:
                 await self._sweep()
+                if tick % PURGE_EVERY_TICKS == 0:               # на старте и далее раз в сутки
+                    removed = self.db.purge(30)
+                    if removed:
+                        log.info("Крестики-нолики: удалено старых партий: %d", removed)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Сбой уборки брошенных партий")
+            tick += 1
             await asyncio.sleep(SWEEP_EVERY_SECONDS)
 
     async def _sweep(self):

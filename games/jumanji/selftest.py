@@ -189,6 +189,18 @@ def test_branch():
     assert "A4" not in m.cells and "B4" not in m.cells and m.cells[ids(5)].target is None
     print("особый путь: OK")
 
+def test_colors():
+    track = Track(make_line(20))
+    m = Match(track, [Player(1, "A"), Player(2, "B"), Player(BOT_IDS[0], "Бот", True)])
+    assert [p.color for p in m.players if not p.is_bot] == [0, 1]
+    m.join(3, "C")
+    m.join(4, "D")
+    m.leave(2)
+    m.join(5, "E")
+    cols = [p.color for p in m.players if not p.is_bot and p.on_map]
+    assert len(set(cols)) == len(cols), cols
+    print("цвета фишек: OK")
+
 def main():
     good = make_line(20, {3: ("jump", 9), 5: "skip", 8: "charge", 10: "mini", 12: ("back", 7), 15: "reset"})
     check("хорошая карта", good, True)
@@ -221,6 +233,7 @@ def main():
     test_editor_helpers()
     test_jitter()
     test_branch()
+    test_colors()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

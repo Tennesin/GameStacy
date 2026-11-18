@@ -173,6 +173,7 @@ class Player:
     place: Optional[int] = None
     bonus: Optional[str] = None  # награда мини-игры на следующий ход: "x2" или "double_roll"
     on_branch: bool = False      # стоит на начале особого пути: следующий ход пойдёт по дороге
+    color: int = -1
 
     @property
     def on_map(self) -> bool:
@@ -199,6 +200,9 @@ class Match:
             raise ValueError("ID участников повторяются.")
         self.track = track
         self.players = list(players)
+        for p in self.players:
+            if not p.is_bot and p.color < 0:
+                p.color = self._pick_color()
         self.rng = rng or random.Random()
         self.current = 0
         self.extra_in_row = 0
@@ -231,6 +235,9 @@ class Match:
         m = cls.__new__(cls)
         m.track = track
         m.players = [Player(**d) for d in data["players"]]
+        for seat, p in enumerate(m.players):
+            if not p.is_bot and p.color < 0:
+                p.color = seat % MAX_PLAYERS
         m.rng = rng or random.Random()
         m.current = int(data["current"])
         m.extra_in_row = int(data["extra_in_row"])
@@ -257,6 +264,16 @@ class Match:
     def free_seats(self) -> int:
         return MAX_PLAYERS - sum(1 for p in self.players if p.on_map)
 
+    def _pick_color(self) -> int:
+        """Цвет новому человеку."""
+        ever = {p.color for p in self.players if not p.is_bot and p.color >= 0}
+        now = {p.color for p in self.players if not p.is_bot and p.on_map and p.color >= 0}
+        for used in (ever, now):
+            for c in range(MAX_PLAYERS):
+                if c not in used:
+                    return c
+        return 0
+
     def start(self) -> list:
         self.current = 0
         return [Event("turn", self.current_player.pid)]
@@ -276,7 +293,9 @@ class Match:
         ok, why = self.can_join(pid)
         if not ok:
             raise ValueError(why)
-        self.players.append(Player(pid, name))                # встаёт на старт, ходит в конце очереди
+        p = Player(pid, name)
+        p.color = self._pick_color()
+        self.players.append(p)
         return [Event("joined", pid)]
 
     def leave(self, pid: int, reason: str = "left") -> list:

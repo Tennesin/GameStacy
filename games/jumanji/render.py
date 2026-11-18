@@ -6,7 +6,7 @@ from PIL import ImageOps
 import asyncio
 import io
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -48,7 +48,6 @@ SIDE_EDGE, SIDE_SAND = (122, 92, 28), (232, 200, 112)
 TRAIL_EXTRA = 28          # на сколько тропа шире круга ячейки (логические px)
 
 BOT_COLORS = [(155, 89, 182), (233, 30, 140), (26, 188, 156), (141, 110, 99)]
-BOT_COLOR_NAMES = ["фиолетовый", "розовый", "бирюзовый", "коричневый"]
 BOT_NAMES = ["Фиолетовый бот", "Розовый бот", "Бирюзовый бот", "Коричневый бот"]
 HUMAN_COLORS = [(66, 133, 244), (59, 200, 100), (250, 210, 50), (235, 60, 60), (245, 140, 40)]
 
@@ -98,7 +97,7 @@ def make_tokens(match, avatars: dict) -> list:
         if p.is_bot:
             color = BOT_IDS.index(p.pid) if p.pid in BOT_IDS else 0
         else:
-            color = seat % len(HUMAN_COLORS)
+            color = p.color if p.color >= 0 else seat % len(HUMAN_COLORS)
         letter = (p.name.strip()[:1] or "?").upper()
         out.append(Token(p.pid, p.pos, p.is_bot, color, avatars.get(p.pid), p.pid == cur, letter))
     return out
@@ -412,6 +411,22 @@ def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
     clear = R + (TRAIL_EXTRA // 2 + 26) * SS
     step = 64 * SS
     pts = samples[::2]
+
+    bucket = clear + 70 * SS                                  # максимальная дальность проверки (пруды)
+    grid: dict = {}                                           # корзины точек тропы: проверка только по соседним
+    for px, py in pts:
+        grid.setdefault((int(px // bucket), int(py // bucket)), []).append((px, py))
+
+    def too_close(x: float, y: float, need: float) -> bool:
+        need2 = need * need
+        bx, by = int(x // bucket), int(y // bucket)
+        for gx2 in (bx - 1, bx, bx + 1):
+            for gy2 in (by - 1, by, by + 1):
+                for px, py in grid.get((gx2, gy2), ()):
+                    if (x - px) ** 2 + (y - py) ** 2 < need2:
+                        return True
+        return False
+
     ponds, items = [], []
     for gy in range(0, H, step):
         for gx in range(0, W, step):
@@ -419,8 +434,7 @@ def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
             y = gy + rng.uniform(0.1, 0.9) * step             # тогда декор не «прыгает» при правке карты
             kind, size = rng.random(), rng.random()
             need = clear + (70 * SS if kind > 0.97 else 0)
-            need2 = need * need
-            if any((x - px) ** 2 + (y - py) ** 2 < need2 for px, py in pts):
+            if too_close(x, y, need):
                 continue
             (ponds if kind > 0.97 else items).append((y, x, kind, size))
 
@@ -449,13 +463,43 @@ def _decorate(img, rng: random.Random, samples: list, W: int, H: int, R: int):
 _BASE_CACHE: OrderedDict = OrderedDict()
 _BASE_CACHE_LIMIT = 6
 
-def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
-    """Тяжёлая часть: рисует всё, кроме фишек. Возвращает (картинка в SS-размере, центры ячеек, список клеток по индексам)."""
+@dataclass
+class _Ctx:
+    """Всё, что нужно функциям рисования основы карты."""
+    m: GameMap
+    show_grid: bool
+    rng: random.Random
+    img: Image.Image
+    d: ImageDraw.ImageDraw
+    W: int
+    H: int
+    R: int
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    pad: int
+    path: list                 # основной маршрут
+    chains: list               # особые пути
+    index: dict                # клетка основного маршрута -> номер
+    side_label: dict           # клетка особой дороги -> подпись «12.3»
+    full: list                 # клетки в порядке индексов позиций (как у Track)
+    centers: dict = field(default_factory=dict)
+
+    def drawable(self, cid) -> bool:
+        return bool(cid) and cid in self.m.cells and parse_cell_id(cid) is not None
+
+def _center(c: _Ctx, cid: str):
+    x, y = parse_cell_id(cid)
+    cell = c.m.cells.get(cid)
+    ox, oy = (0.0, 0.0) if (c.show_grid or cell is None) else (cell.dx, cell.dy)
+    return (((x - c.x0 + 0.5 + ox) * CELL + c.pad) * SS, ((y - c.y0 + 0.5 + oy) * CELL + c.pad) * SS)
+
+def _make_ctx(m: GameMap, show_grid: bool) -> _Ctx:
     path, _problem = trace_path(m)
     index = {cid: i for i, cid in enumerate(path)}
     chains, _bad = side_chains(m, path)
-    full = list(path)                                         # клетки в том же порядке, что индексы позиций у Track
-    side_label = {}                                           # клетка дороги -> подпись вида «12.3»
+    full, side_label = list(path), {}
     for bid, chain, _exit in chains:
         for k, cid in enumerate(chain, start=1):
             full.append(cid)
@@ -468,37 +512,46 @@ def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
     H = ((y1 - y0 + 1) * CELL + 2 * pad) * SS
     rng = random.Random(zlib.crc32(m.name.encode("utf-8")))
     img = Image.new("RGBA", (W, H), BG) if show_grid else _terrain(W, H, rng)
-    d = ImageDraw.Draw(img, "RGBA")
-    R = RADIUS * SS
+    c = _Ctx(m=m, show_grid=show_grid, rng=rng, img=img, d=ImageDraw.Draw(img, "RGBA"), W=W, H=H,
+             R=RADIUS * SS, x0=x0, y0=y0, x1=x1, y1=y1, pad=pad, path=path, chains=chains,
+             index=index, side_label=side_label, full=full)
+    c.centers = {cid: _center(c, cid) for cid in m.cells if c.drawable(cid)}
+    return c
 
-    def center(cid: str):
-        x, y = parse_cell_id(cid)
-        c = m.cells.get(cid)
-        ox, oy = (0.0, 0.0) if (show_grid or c is None) else (c.dx, c.dy)
-        return (((x - x0 + 0.5 + ox) * CELL + pad) * SS, ((y - y0 + 0.5 + oy) * CELL + pad) * SS)
+def _draw_trails_and_decor(c: _Ctx) -> list:
+    """Тропы и ландшафт. Возвращает точки троп (они нужны стрелкам прыжков). В режиме сетки не рисуется."""
+    if c.show_grid:
+        return []
+    samples, centers = [], c.centers
+    for bid, chain, exit_id in c.chains:
+        ids = [bid, *chain] + ([exit_id] if exit_id else [])
+        if all(i in centers for i in ids) and len(ids) >= 2:
+            samples += _draw_trail(c.img, [centers[i] for i in ids], SIDE_EDGE, SIDE_SAND, c.R)
+    main_pts = [centers[i] for i in c.path if i in centers]
+    if len(main_pts) >= 2:
+        samples += _draw_trail(c.img, main_pts, TRAIL_EDGE, TRAIL_SAND, c.R)
+    _decorate(c.img, c.rng, samples, c.W, c.H, c.R)
+    return samples
 
-    def drawable(cid) -> bool:
-        return bool(cid) and cid in m.cells and parse_cell_id(cid) is not None
+def _draw_grid_labels(c: _Ctx):
+    """Подписи координат и пустые места сетки (только в редакторе)."""
+    font, _ = _font(13 * SS)
+    for gx in range(c.x0, c.x1 + 1):
+        for gy in range(c.y0, c.y1 + 1):
+            cx = ((gx - c.x0) * CELL + CELL / 2 + c.pad) * SS
+            cy = ((gy - c.y0) * CELL + CELL / 2 + c.pad) * SS
+            cid = f"{chr(65 + gx)}{gy + 1}"
+            if cid not in c.m.cells:
+                c.d.ellipse((cx - 6 * SS, cy - 6 * SS, cx + 6 * SS, cy + 6 * SS), fill=(80, 84, 92, 255))
+            c.d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
+                     font=font, fill=(125, 130, 140, 255))
 
-    centers = {cid: center(cid) for cid in m.cells if drawable(cid)}
-
-    # тропа и ландшафт (в режиме редактора с сеткой не рисуем)
-    samples = []
-    if not show_grid:
-        main_pts = [centers[c] for c in path if c in centers]
-        for chain_info in chains:
-            bid, chain, exit_id = chain_info
-            ids = [bid, *chain] + ([exit_id] if exit_id else [])
-            if all(c in centers for c in ids) and len(ids) >= 2:
-                samples += _draw_trail(img, [centers[c] for c in ids], SIDE_EDGE, SIDE_SAND, R)
-        if len(main_pts) >= 2:
-            samples += _draw_trail(img, main_pts, TRAIL_EDGE, TRAIL_SAND, R)
-        _decorate(img, rng, samples, W, H, R)
-
-    # данные для обхода тропы стрелками прыжков
+def _draw_jump_arrows(c: _Ctx, samples: list):
+    """Стрелки прыжков и откатов: идут снаружи тропы, у каждой тёмная обводка."""
+    R, centers, path = c.R, c.centers, c.path
     half = R + (TRAIL_EXTRA + 12) * SS / 2                    # полуширина тропы вместе с каймой
     trail_pts = samples[::2]
-    off_route = [p for cid, p in centers.items() if cid not in index and cid not in side_label]
+    off_route = [p for cid, p in centers.items() if cid not in c.index and cid not in c.side_label]
     normals = {}                                              # нормаль к тропе в ячейках основного маршрута
     for i, cid in enumerate(path):
         p, q = centers.get(path[max(i - 1, 0)]), centers.get(path[min(i + 1, len(path) - 1)])
@@ -509,64 +562,52 @@ def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
         if ln:
             normals[cid] = (-ty / ln, tx / ln)
 
-    # подписи координат и пустые места сетки (только в редакторе)
-    if show_grid:
-        label_font, _ = _font(13 * SS)
-        for gx in range(x0, x1 + 1):
-            for gy in range(y0, y1 + 1):
-                cx = ((gx - x0) * CELL + CELL / 2 + pad) * SS
-                cy = ((gy - y0) * CELL + CELL / 2 + pad) * SS
-                cid = f"{chr(65 + gx)}{gy + 1}"
-                if cid not in m.cells:
-                    d.ellipse((cx - 6 * SS, cy - 6 * SS, cx + 6 * SS, cy + 6 * SS), fill=(80, 84, 92, 255))
-                d.text((cx - CELL / 2 * SS + 6 * SS, cy + CELL / 2 * SS - 20 * SS), cid,
-                       font=label_font, fill=(125, 130, 140, 255))
-
-    # стрелки прыжков и откатов: идут снаружи тропы, у каждой тёмная обводка
-    box = (3 * SS, 3 * SS, W - 3 * SS, H - 3 * SS)
-    for cid, c in m.cells.items():
-        if c.effect in ("jump", "back") and drawable(cid) and drawable(c.target):
-            a, b = centers[cid], centers[c.target]
-            pts = _route(a, b, normals.get(cid), normals.get(c.target), trail_pts, off_route, box, half, R)
+    box = (3 * SS, 3 * SS, c.W - 3 * SS, c.H - 3 * SS)
+    for cid, cell in c.m.cells.items():
+        if cell.effect in ("jump", "back") and c.drawable(cid) and c.drawable(cell.target):
+            a, b = centers[cid], centers[cell.target]
+            pts = _route(a, b, normals.get(cid), normals.get(cell.target), trail_pts, off_route, box, half, R)
             pts = _trim(pts, a, b, R + 3 * SS, R + 3 * SS)
-            _poly_arrow(d, pts, (20, 22, 26, 230), 8 * SS, 15 * SS)
-            _poly_arrow(d, pts, EFFECT_COLORS[c.effect] + (255,), 4 * SS, 12 * SS)
+            _poly_arrow(c.d, pts, (20, 22, 26, 230), 8 * SS, 15 * SS)
+            _poly_arrow(c.d, pts, EFFECT_COLORS[cell.effect] + (255,), 4 * SS, 12 * SS)
 
-    # стрелки маршрута (внутри дороги — жёлтые)
-    for cid, c in m.cells.items():
-        if cid == m.finish or cid == c.next or not drawable(cid) or not drawable(c.next):
+def _draw_route_arrows(c: _Ctx):
+    """Стрелки маршрута (внутри дороги жёлтые) и пунктир «начало особого пути -> первая клетка дороги»."""
+    R, m, centers = c.R, c.m, c.centers
+    for cid, cell in m.cells.items():
+        if cid == m.finish or cid == cell.next or not c.drawable(cid) or not c.drawable(cell.next):
             continue
-        color = SIDE_LINK if cid in side_label else (LINK_ON if cid in index else LINK_OFF)
-        _arrow(d, centers[cid], centers[c.next], color, 5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS)
-
-    # связь «начало особого пути -> первая клетка дороги»: жёлтый пунктир
-    for cid, c in m.cells.items():
-        if c.effect == "branch" and drawable(cid) and drawable(c.target):
-            _arrow(d, centers[cid], centers[c.target], EFFECT_COLORS["branch"] + (255,),
+        color = SIDE_LINK if cid in c.side_label else (LINK_ON if cid in c.index else LINK_OFF)
+        _arrow(c.d, centers[cid], centers[cell.next], color, 5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS)
+    for cid, cell in m.cells.items():
+        if cell.effect == "branch" and c.drawable(cid) and c.drawable(cell.target):
+            _arrow(c.d, centers[cid], centers[cell.target], EFFECT_COLORS["branch"] + (255,),
                    5 * SS, 11 * SS, R + 2 * SS, R + 2 * SS, dashed=True)
 
-    # ячейки
-    for cid, c in m.cells.items():
-        if not drawable(cid):
+def _draw_cells(c: _Ctx, selected: Optional[str]):
+    m, d, R = c.m, c.d, c.R
+    for cid, cell in m.cells.items():
+        if not c.drawable(cid):
             continue
-        cx, cy = centers[cid]
-        on = cid in index or cid in side_label
+        cx, cy = c.centers[cid]
+        on = cid in c.index or cid in c.side_label
         a = 255 if on else ORPHAN_ALPHA
         if cid == m.finish:
             kind, fill, ring, fg = "finish", FINISH_FILL, FINISH_RING, (30, 30, 30)
         elif cid == m.start:
             kind, fill, ring, fg = "start", NORMAL, START_RING, (200, 40, 40)
-        elif c.effect in EFFECT_COLORS:
-            fill = EFFECT_COLORS[c.effect]
-            kind, ring = c.effect, ((150, 150, 160) if c.effect == "reset" else tuple(int(v * 0.7) for v in fill))
-            fg = (45, 45, 45) if c.effect == "mini" else (255, 255, 255)
+        elif cell.effect in EFFECT_COLORS:
+            fill = EFFECT_COLORS[cell.effect]
+            kind = cell.effect
+            ring = (150, 150, 160) if cell.effect == "reset" else tuple(int(v * 0.7) for v in fill)
+            fg = (45, 45, 45) if cell.effect == "mini" else (255, 255, 255)
         else:
             kind, fill, ring, fg = None, NORMAL, (150, 153, 160), None
         width = (6 if kind in ("start", "finish") else 4) * SS
         circle = (cx - R, cy - R, cx + R, cy + R)
         d.ellipse(circle, fill=fill + (a,), outline=ring + (a,), width=width)
-        if c.side:
-            _stripes(img, cx, cy, R, a)
+        if cell.side:
+            _stripes(c.img, cx, cy, R, a)
             d.ellipse(circle, outline=ring + (a,), width=width)
         if kind in ("start", "finish"):
             _icon(d, kind, cx, cy, fg + (a,))
@@ -574,7 +615,16 @@ def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
             rr = R + 8 * SS
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(255, 255, 255, 255), width=5 * SS)
 
-    return img, centers, full
+def _build_base(m: GameMap, selected: Optional[str], show_grid: bool):
+    """Тяжёлая часть: рисует всё, кроме фишек."""
+    c = _make_ctx(m, show_grid)
+    samples = _draw_trails_and_decor(c)
+    if show_grid:
+        _draw_grid_labels(c)
+    _draw_jump_arrows(c, samples)
+    _draw_route_arrows(c)
+    _draw_cells(c, selected)
+    return c.img, c.centers, c.full
 
 def _shrink_base(built):
     """(картинка в SS-размере, центры, клетки) -> (основа в ИТОГОВОМ размере, центры в итоговых px, клетки, масштаб f).
@@ -592,10 +642,15 @@ def _shrink_base(built):
 
 _SPRITE_HALF = 80 * SS        # половина стороны спрайта клетки: вмещает кольцо фишек, ореол и булавку
 
-def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False) -> bytes:
+def map_key(m: GameMap) -> int:
+    """Хэш карты для кэша основы. Считается один раз на партию."""
+    return zlib.crc32(m.to_json().encode("utf-8"))
+
+def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_grid: bool = False,
+                 cache_key: Optional[int] = None) -> bytes:
     """PNG-табло. tokens — фишки (make_tokens). Основа (уже в итоговом размере) берётся из кэша."""
-    cacheable = selected is None                              # с выделенной ячейкой (редактор) кэш не нужен
-    key = (zlib.crc32(m.to_json().encode("utf-8")), show_grid)
+    cacheable = selected is None
+    key = (cache_key if cache_key is not None else map_key(m), show_grid)
     base = _BASE_CACHE.get(key) if cacheable else None
     if base is None:
         base = _shrink_base(_build_base(m, selected, show_grid))
@@ -644,10 +699,10 @@ def render_board(m: GameMap, tokens=(), selected: Optional[str] = None, show_gri
 _lock: Optional[asyncio.Semaphore] = None
 
 async def render_board_async(m: GameMap, tokens=(), selected: Optional[str] = None,
-                             show_grid: bool = False) -> bytes:
+                             show_grid: bool = False, cache_key: Optional[int] = None) -> bytes:
     """Рисует в отдельном потоке и не больше одной картинки за раз (на сервере всего 1 ГБ памяти)."""
     global _lock
     if _lock is None:
         _lock = asyncio.Semaphore(1)
     async with _lock:
-        return await asyncio.to_thread(render_board, m, list(tokens), selected, show_grid)
+        return await asyncio.to_thread(render_board, m, list(tokens), selected, show_grid, cache_key)
