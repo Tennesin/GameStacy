@@ -35,6 +35,7 @@ from .views import ConfirmLeaveView, LobbyView, PlayView
 log = logging.getLogger("stacy.ludo")
 
 NO_PINGS = discord.AllowedMentions.none()
+ROLL_DEBOUNCE_SECONDS = 1.5     # повторный бросок от того же человека раньше этого срока считается двойным кликом
 MEDALS = ["🥇", "🥈", "🥉", "4️⃣"]
 BOT_NAMES = tuple(f"Бот {i + 1}" for i in range(LUDO_MAX_BOTS))
 
@@ -51,8 +52,9 @@ RULES_TEXT = (
     "Две свои фигуры в одной клетке — блок: его нельзя ни пройти, ни занять. "
     "В центр можно попасть только точным броском.\n"
     f"Пропущенные ходы подряд ({LUDO_TIMEOUTS_TO_LEAVE}) — вы выбываете. "
-    f"Кто привёл все {LUDO_PIECES} фигуры в центр, занимает очередное место; партия идёт, "
-    "пока на поле не останется один игрок.")
+    f"Кто привёл все {LUDO_PIECES} фигуры в центр, занимает очередное место. Партия заканчивается, "
+    "когда на поле остаётся один игрок или не остаётся ни одного человека: "
+    "остальные места определяются по продвижению фигур.")
 
 @dataclass
 class Runtime:
@@ -70,6 +72,7 @@ class Runtime:
     ping_id: Optional[int] = None       # сообщение «ваш ход» с настоящим тегом
     ping_pid: Optional[int] = None      # кому оно адресовано
     started: Optional[datetime] = None  # когда партия началась
+    last_action: float = 0.0            # когда человек в последний раз бросил кубик (защита от двойного клика)
 
 class LudoController:
     def __init__(self, bot, storage: Storage):
@@ -422,8 +425,11 @@ class LudoController:
                     interaction, f"Сейчас не ваш ход: ходит {self._label(rt, m.current_player.pid)}.")
             elif m.phase != "roll":
                 await self._reply(interaction, "Сначала выберите фигуру.")
+            elif time.monotonic() - rt.last_action < ROLL_DEBOUNCE_SECONDS:
+                await self._reply(interaction, "Кубик только что был брошен. Подождите секунду.")
             else:
                 await self._after(rt, m.roll())
+                rt.last_action = time.monotonic()
 
     async def pick(self, interaction: discord.Interaction, game_id: int, piece: int):
         await interaction.response.defer()
@@ -489,14 +495,16 @@ class LudoController:
         if not bump:
             bump = await should_bump(self.bot, rt.channel_id, rt.message_id)
         if m.over:
-            self._cancel(rt)
-            rt.deadline = None
-            self.db.finish(rt.game_id, m.snapshot())
-            await self._drop_ping(rt)
-            await self._publish(rt, bump=bump)          # табло: итоговая картинка и расстановка
-            await self._send_results(rt)                # итоги: отдельным сообщением
-            self.rt.pop(rt.game_id, None)
-            self.locks.pop(rt.game_id, None)
+            try:
+                self._cancel(rt)
+                rt.deadline = None
+                self.db.finish(rt.game_id, m.snapshot())
+                await self._drop_ping(rt)
+                await self._publish(rt, bump=bump)          # табло: итоговая картинка и расстановка
+                await self._send_results(rt)                # итоги: отдельным сообщением
+            finally:
+                self.rt.pop(rt.game_id, None)
+                self.locks.pop(rt.game_id, None)
             return
         if rearm:
             self._arm(rt)
@@ -606,7 +614,8 @@ class LudoController:
             return
         try:
             msg = await self.bot.get_partial_messageable(rt.channel_id).send(
-                f"🎲 <@{want}>, ваш ход! Нажмите «Бросить кубик» (на бросок {LUDO_ROLL_SECONDS} с).",
+                f"🎲 <@{want}>, ваш ход! Бросьте кубик (на бросок {LUDO_ROLL_SECONDS} с) "
+                f"или выберите фигуру (на выбор {LUDO_PICK_SECONDS} с).",
                 allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=want)]))
             rt.ping_id, rt.ping_pid = msg.id, want
             self.db.set_ping(rt.game_id, msg.id)
@@ -669,7 +678,7 @@ class LudoController:
         m = rt.match
         png = None
         try:
-            urls = {p.pid: rt.avatars.get(p.pid, "") for p in m.players if p.on_map and not p.is_bot}
+            urls = {p.pid: rt.avatars.get(p.pid, "") for p in m.players if not p.left and not p.is_bot}
             avatars = await load_avatars(urls)
             pieces, seats = make_scene(m, avatars)
             png = await render_board_async(pieces, seats)

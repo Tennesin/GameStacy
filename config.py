@@ -32,7 +32,9 @@ BUMP_ENABLED = True        # False — функция выключена
 BUMP_AFTER_MESSAGES = 3    # сколько чужих сообщений под табло вызывают переотправку
 BUMP_LOOKAHEAD = 20        # сколько сообщений под табло просматривать (свои тоже попадают в выборку)
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
-GAMES = ["games.mini_games", "games.x_o", "games.jumanji"]   # мини-игры подключаются первыми
+GAMES = [
+    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo"
+]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stacy")
