@@ -18,5 +18,6 @@ oracle-info.txt
 # Данные и временные папки
 data/
 jumanji_preview/
+ludo/preview/
 maps_export/
 maps_import/

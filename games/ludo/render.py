@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 from core.imaging import font as _font, render_in_thread
 from .board import (AVATAR_R, AVATAR_XY, BASE_ORIGIN, BASE_SLOTS, HOME_COLUMN, RING, START, STARS,
                     TURN_MARK_SIZE, TURN_MARK_XY, cell_xy)
-from .rules import LUDO_FINISH
+from .rules import LUDO_FINISH, LUDO_RING_STEPS
 
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
 
@@ -237,7 +237,8 @@ def _cell_sprite(group: list, single: float = SINGLE_DIA):
 
     by_seat: dict = {}
     for i, p in enumerate(group):
-        by_seat.setdefault(p.seat, []).append(i)
+        if p.progress <= LUDO_RING_STEPS:
+            by_seat.setdefault(p.seat, []).append(i)
     for idxs in by_seat.values():
         if len(idxs) >= 2:
             _capsule(d, [pos[i] for i in idxs], dia)
