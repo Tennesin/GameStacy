@@ -71,15 +71,15 @@ def test_capture_and_safety():
     m, a, b = duo(FixedRng(4)); a.pieces = [5, 0, 0, 0]; b.pieces = [35, 0, 0, 0]
     ev = m.roll()
     assert "capture" not in kinds(ev) and b.pieces[0] == 35 and a.pieces[0] == 9
-    # собственная стартовая клетка безопасна для владельца
+    # стартовая клетка безопасна и для владельца, и для чужих: фигура B на своей старте не берётся
     m, a, b = duo(FixedRng(3)); a.pieces = [24, 0, 0, 0]; b.pieces = [1, 0, 0, 0]
     ev = m.roll()
     assert "capture" not in kinds(ev) and b.pieces[0] == 1 and a.pieces[0] == 27
-    # а на чужой стартовой клетке фигура уязвима: выход A (шестёрка) берёт фигуру B на стартовой клетке A
+    # и на ЧУЖОЙ стартовой клетке фигура неуязвима: выход A (шестёрка) не берёт фигуру B на старте A
     m, a, b = duo(FixedRng(6)); b.pieces = [27, 0, 0, 0]
-    assert ring_index(2, 27) == 0 and not is_safe(2, 0)
+    assert ring_index(2, 27) == 0 and is_safe(2, 0)
     ev = m.roll()
-    assert "capture" in kinds(ev) and b.pieces[0] == 0 and a.pieces[0] == 1
+    assert "capture" not in kinds(ev) and b.pieces[0] == 27 and a.pieces[0] == 1
     print("взятие и безопасные клетки: OK")
 
 def test_sixes_reset_and_column_block():

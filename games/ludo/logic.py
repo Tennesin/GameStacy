@@ -14,7 +14,7 @@ import random
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
-from .board import START, is_safe, ring_index
+from .board import is_safe, ring_index
 from .rules import (
     LUDO_BONUS_ON_CAPTURE, LUDO_BONUS_ON_FINISH, LUDO_DICE_SIDES, LUDO_EXIT_ROLL, LUDO_FINISH,
     LUDO_LAYOUT, LUDO_MAX_PLAYERS, LUDO_MAX_SIXES_IN_ROW, LUDO_MIN_PLAYERS, LUDO_PIECES,
@@ -424,8 +424,6 @@ class Match:
                 dist = (idx - e) % LUDO_RING_LEN
                 if 1 <= dist <= LUDO_DICE_SIDES and prog + dist <= LUDO_RING_STEPS:
                     threats += 1
-            if idx == START[q.seat] and 0 in q.pieces:         # соперник может выйти из базы прямо на меня
-                threats += 1
         return threats
 
     def _hunt(self, seat: int, idx: int) -> int:

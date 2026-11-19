@@ -11,6 +11,7 @@ RING = (
 
 START = tuple(LUDO_SEAT_GAP * k for k in range(4))                # 0, 13, 26, 39
 STARS = tuple(s + LUDO_STAR_OFFSET for s in START)                # 8, 21, 34, 47
+SAFE_CELLS = frozenset(STARS) | frozenset(START)       # звёзды и стартовые клетки всех четырёх мест
 
 # Домашние колонки (5 клеток от кольца к центру) и центр
 HOME_COLUMN = (
@@ -39,9 +40,8 @@ def ring_index(seat: int, progress: int):
     return None
 
 def is_safe(seat: int, ring_idx: int) -> bool:
-    """Безопасность - свойство фигуры: звёзды и собственная стартовая клетка владельца.
-    ОТКРЫТОЕ РЕШЕНИЕ (вариант Б). Вариант А (оригинал Ludo King): ring_idx in STARS or ring_idx in START."""
-    return ring_idx in STARS or ring_idx == START[seat]
+    """Безопасные клетки: звёзды и ВСЕ стартовые клетки."""
+    return ring_idx in SAFE_CELLS
 
 def cell_xy(seat: int, progress: int, piece: int):
     """Координаты центра фигуры на сетке (в клетках, с учётом +0.5 для клеток)."""
