@@ -25,8 +25,8 @@ from .render import make_scene, render_board_async
 from .rules import (
     LUDO_BONUS_ON_CAPTURE, LUDO_BONUS_ON_FINISH, LUDO_BOT_DELAY_SECONDS, LUDO_EXIT_ROLL, LUDO_FINISH,
     LUDO_LOBBY_SECONDS, LUDO_LOG_LINES, LUDO_MAX_BOTS, LUDO_MAX_PLAYERS, LUDO_MAX_SIXES_IN_ROW,
-    LUDO_MIN_PLAYERS, LUDO_PICK_SECONDS, LUDO_PIECES, LUDO_ROLL_SECONDS, LUDO_SEAT_EMOJI,
-    LUDO_TIMEOUTS_TO_LEAVE,
+    LUDO_MIN_PLAYERS, LUDO_PASS_OWN_BLOCKS, LUDO_PICK_SECONDS, LUDO_PIECES, LUDO_ROLL_SECONDS,
+    LUDO_SEAT_EMOJI, LUDO_TIMEOUTS_TO_LEAVE,
 )
 from .storage import Storage
 from .texts import describe
@@ -43,6 +43,12 @@ _BONUS = (["шестёрка"]
           + (["взятие чужой фигуры"] if LUDO_BONUS_ON_CAPTURE else [])
           + (["приход фигуры в центр"] if LUDO_BONUS_ON_FINISH else []))
 
+_BLOCK_RULE = (
+    "Две свои фигуры на обычной клетке — блок: соперники не могут его ни пройти, ни занять"
+    + ("; свои фигуры могут его пройти, но встать на него нельзя. " if LUDO_PASS_OWN_BLOCKS
+       else "; свои фигуры тоже. ")
+    + "На звёздах и стартовых клетках блок не образуется: фигуры просто стоят рядом. ")
+
 RULES_TEXT = (
     f"**Правила.** Бросайте кубик по очереди (на бросок {LUDO_ROLL_SECONDS} с, на выбор фигуры "
     f"{LUDO_PICK_SECONDS} с). Фигура выходит из базы только на {LUDO_EXIT_ROLL}. "
@@ -50,7 +56,7 @@ RULES_TEXT = (
     "Чужую фигуру берёте, остановившись на её клетке: она возвращается в базу. "
     "Безопасны клетки со звездой и все стартовые клетки (места выхода из базы): "
     "на них чужую фигуру взять нельзя, и там могут стоять фигуры разных цветов. "
-    "Две свои фигуры в одной клетке — блок: его нельзя ни пройти, ни занять. "
+    + _BLOCK_RULE +
     "В центр можно попасть только точным броском.\n"
     f"Пропущенные ходы подряд ({LUDO_TIMEOUTS_TO_LEAVE}) — вы выбываете. "
     f"Кто привёл все {LUDO_PIECES} фигуры в центр, занимает очередное место. Партия заканчивается, "

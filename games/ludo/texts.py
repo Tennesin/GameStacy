@@ -1,14 +1,13 @@
-"""Тексты событий партии Ludo для лога под табло. Про Discord и БД ничего не знает.
-
-Числа времени и лимиты берутся из rules.py. Номера фигур для игроков: piece + 1 (как на кнопках)."""
+"""Тексты событий партии Ludo для лога под табло. Про Discord и БД ничего не знает."""
 from typing import Callable, Optional
 
-from .rules import LUDO_PICK_SECONDS, LUDO_TIMEOUTS_TO_LEAVE
+from .rules import LUDO_PASS_OWN_BLOCKS, LUDO_PICK_SECONDS, LUDO_TIMEOUTS_TO_LEAVE
+
+BLOCK_TAIL = ("соперники его не пройдут и не займут; свои фигуры могут его перешагнуть"
+              if LUDO_PASS_OWN_BLOCKS else "его нельзя ни пройти, ни занять")
 
 def describe(ev, who: str, label: Callable = str, bold=str) -> Optional[str]:
-    """Строка для лога по событию движка или None (turn, pick и обычный game_over отдельных строк не имеют).
-    who - готовая подпись ходящего; label(pid) - подпись другого игрока (для взятия);
-    bold - как выделять числа (в Discord: lambda v: f"**{v}**")."""
+    """Строка для лога по событию движка или None."""
     k, d = ev.kind, ev.data
     n = d.get("piece", 0) + 1
 
@@ -33,7 +32,7 @@ def describe(ev, who: str, label: Callable = str, bold=str) -> Optional[str]:
     if k == "home_column":
         return f"🏠 {who}: фигура {n} заходит в домашнюю колонку"
     if k == "block":
-        return f"🧱 {who}: фигуры встали вместе и образовали блок (его нельзя ни пройти, ни занять)"
+        return f"🧱 {who}: две фигуры встали вместе и образовали блок ({BLOCK_TAIL})"
     if k == "piece_home":
         return f"🏁 {who}: фигура {n} дошла до центра"
     if k == "finished":

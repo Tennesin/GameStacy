@@ -17,8 +17,8 @@ from typing import Optional
 from .board import is_safe, ring_index
 from .rules import (
     LUDO_BONUS_ON_CAPTURE, LUDO_BONUS_ON_FINISH, LUDO_DICE_SIDES, LUDO_EXIT_ROLL, LUDO_FINISH,
-    LUDO_LAYOUT, LUDO_MAX_PLAYERS, LUDO_MAX_SIXES_IN_ROW, LUDO_MIN_PLAYERS, LUDO_PIECES,
-    LUDO_RESET_TIMEOUTS_ON_MOVE, LUDO_RING_LEN, LUDO_RING_STEPS, LUDO_TIMEOUTS_TO_LEAVE,
+    LUDO_LAYOUT, LUDO_MAX_PLAYERS, LUDO_MAX_SIXES_IN_ROW, LUDO_MIN_PLAYERS, LUDO_PASS_OWN_BLOCKS,
+    LUDO_PIECES, LUDO_RESET_TIMEOUTS_ON_MOVE, LUDO_RING_LEN, LUDO_RING_STEPS, LUDO_TIMEOUTS_TO_LEAVE,
 )
 
 def effective_bots(humans: int, setting: int) -> int:
@@ -169,15 +169,27 @@ class Match:
         return occ
 
     @staticmethod
-    def _blocked_cells(occ: dict) -> set:
-        """Клетки с блоком: две фигуры одного цвета. Ни пройти, ни встать."""
-        return {idx for idx, by in occ.items() if any(len(v) >= 2 for v in by.values())}
+    def _blocked_cells(occ: dict) -> dict:
+        """Клетки с блоком: клетка кольца -> место владельца блока."""
+        out = {}
+        for idx, by in occ.items():
+            if len(by) != 1:
+                continue                                       # на клетке есть чужая фигура: блока нет
+            seat, pcs = next(iter(by.items()))
+            if len(pcs) >= 2 and not is_safe(seat, idx):
+                out[idx] = seat
+        return out
 
     @staticmethod
-    def _path_blocked(seat: int, frm: int, to: int, blocked: set) -> bool:
+    def _path_blocked(seat: int, frm: int, to: int, blocked: dict) -> bool:
+        """Мешает ли блок ходу фигуры места seat с прогресса frm на прогресс to.."""
         for q in range(frm + 1, min(to, LUDO_RING_STEPS) + 1):     # колонка и центр блоков не знают
-            if ring_index(seat, q) in blocked:
-                return True
+            owner = blocked.get(ring_index(seat, q))
+            if owner is None:
+                continue
+            if owner == seat and LUDO_PASS_OWN_BLOCKS and q != to:
+                continue
+            return True
         return False
 
     @staticmethod
@@ -325,7 +337,7 @@ class Match:
             ev.append(Event("piece_home", p.pid, {"piece": m.piece}))
         elif m.kind == "home":
             ev.append(Event("home_column", p.pid, {"piece": m.piece}))
-        elif m.to <= LUDO_RING_STEPS and sum(1 for x in p.pieces if x == m.to) >= 2:
+        elif m.to <= LUDO_RING_STEPS and self._makes_block(p, m.to):
             ev.append(Event("block", p.pid, {"piece": m.piece, "to": m.to}))
 
         if all(x == LUDO_FINISH for x in p.pieces):
@@ -333,6 +345,13 @@ class Match:
         bonus = (m.d == 6 or (captured and LUDO_BONUS_ON_CAPTURE)
                  or (m.to == LUDO_FINISH and LUDO_BONUS_ON_FINISH))
         return ev + self._next(p, bonus)
+
+    @staticmethod
+    def _makes_block(p: Player, progress: int) -> bool:
+        """Образовался ли блок на клетке кольца с этим прогрессом: две свои фигуры на небезопасной клетке."""
+        if sum(1 for x in p.pieces if x == progress) < 2:
+            return False
+        return not is_safe(p.seat, ring_index(p.seat, progress))
 
     def _next(self, p: Player, bonus: bool) -> list:
         """После хода: либо тот же игрок бросает ещё раз, либо ход переходит дальше."""
@@ -457,7 +476,8 @@ class Match:
         s -= self._danger(p.seat, after) * (200 + 6 * m.to) / 6        # не встаём под удар
         if after is not None:
             s += 15 * self._hunt(p.seat, after)
-            if any(i != m.piece and x == m.to for i, x in enumerate(p.pieces)):
+            if (not is_safe(p.seat, after)
+                    and any(i != m.piece and x == m.to for i, x in enumerate(p.pieces))):
                 s += 40                                        # строим блок
         return s
 

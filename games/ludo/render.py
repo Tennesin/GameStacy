@@ -14,8 +14,10 @@ from typing import Optional
 from PIL import Image, ImageDraw
 
 from core.imaging import font as _font, render_in_thread
-from .board import (AVATAR_R, AVATAR_XY, BASE_ORIGIN, BASE_SLOTS, HOME_COLUMN, RING, START, STARS,
-                    TURN_MARK_SIZE, TURN_MARK_XY, cell_xy)
+from .board import (
+    AVATAR_R, AVATAR_XY, BASE_ORIGIN, BASE_SLOTS, HOME_COLUMN, RING,
+    START, STARS, TURN_MARK_SIZE, TURN_MARK_XY, cell_xy, is_safe, ring_index
+)
 from .rules import LUDO_FINISH, LUDO_RING_STEPS
 
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
@@ -235,11 +237,11 @@ def _cell_sprite(group: list, single: float = SINGLE_DIA):
     pos = [(CU + dx * CU, CU + dy * CU) for dx, dy, _dia in slots]
     dia = slots[0][2] * CU
 
-    by_seat: dict = {}
-    for i, p in enumerate(group):
-        if p.progress <= LUDO_RING_STEPS:
-            by_seat.setdefault(p.seat, []).append(i)
-    for idxs in by_seat.values():
+    # Блок: только свои фигуры одного цвета на небезопасной клетке кольца, чужих в клетке нет
+    if len({p.seat for p in group}) == 1:
+        idxs = [i for i, p in enumerate(group)
+                if 0 < p.progress <= LUDO_RING_STEPS
+                and not is_safe(p.seat, ring_index(p.seat, p.progress))]
         if len(idxs) >= 2:
             _capsule(d, [pos[i] for i in idxs], dia)
     for p, (x, y) in zip(group, pos):

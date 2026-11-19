@@ -13,6 +13,7 @@ LUDO_EXIT_ROLL = 6                     # число, которым фигура
 LUDO_MAX_SIXES_IN_ROW = 3              # на третьей подряд шестёрке ход не выполняется
 LUDO_BONUS_ON_CAPTURE = True
 LUDO_BONUS_ON_FINISH = True
+LUDO_PASS_OWN_BLOCKS = True            # свои фигуры могут перешагнуть свой блок (встать на него нельзя)
 
 # ---------- Время ----------
 LUDO_ROLL_SECONDS = 30                 # на бросок

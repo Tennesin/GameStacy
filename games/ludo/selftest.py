@@ -5,6 +5,7 @@ import random
 from core.players import BOT_IDS
 from .board import HOME_COLUMN, RING, STARS, START, is_safe, ring_index
 from .logic import Match, Player, effective_bots
+from . import logic as L
 
 class FixedRng(random.Random):
     """Кубик с заранее заданными значениями (остальное - обычный Random)."""
@@ -98,11 +99,38 @@ def test_blocks():
     assert [x.piece for x in m.legal_moves(b, 1)] == [0]                      # на клетку 3 можно
     assert m.legal_moves(b, 2) == []                                          # встать на блок нельзя
     assert m.legal_moves(b, 3) == []                                          # пройти через блок нельзя
-    m, a, b = duo(); a.pieces = [5, 5, 3, 0]                                  # свой блок мешает и своим
-    assert [x.piece for x in m.legal_moves(a, 2)] == [0, 1]
-    m, a, b = duo(); a.pieces = [1, 1, 0, 0]                                  # блок на собственной стартовой клетке
-    assert [x.piece for x in m.legal_moves(a, 6)] == [0, 1]                   # выйти из базы нельзя
+
+    old = L.LUDO_PASS_OWN_BLOCKS
+    try:
+        m, a, b = duo(); a.pieces = [5, 5, 3, 0]                              # свой блок
+        L.LUDO_PASS_OWN_BLOCKS = True
+        assert [x.piece for x in m.legal_moves(a, 2)] == [0, 1]               # встать на свой блок нельзя
+        assert [x.piece for x in m.legal_moves(a, 3)] == [0, 1, 2]            # а перешагнуть можно
+        L.LUDO_PASS_OWN_BLOCKS = False
+        assert [x.piece for x in m.legal_moves(a, 3)] == [0, 1]               # настройка выключена: нельзя
+    finally:
+        L.LUDO_PASS_OWN_BLOCKS = old
+
+    m, a, b = duo(); a.pieces = [1, 1, 0, 0]                                  # две фигуры на своём старте: не блок
+    assert m._blocked_cells(m._ring_map()) == {}
+    assert [x.piece for x in m.legal_moves(a, 6)] == [0, 1, 2, 3]             # выйти из базы можно
     print("блоки: OK")
+
+def test_block_rules():
+    # две свои фигуры на звезде, где стоит чужая: блока нет, взятия нет
+    m, a, b = duo(FixedRng(4)); a.pieces = [9, 5, 0, 0]; b.pieces = [35, 0, 0, 0]
+    m.roll()
+    assert m.phase == "pick"
+    ev = m.choose(1)
+    assert "block" not in kinds(ev) and "capture" not in kinds(ev)
+    assert a.pieces[:2] == [9, 9] and b.pieces[0] == 35
+    assert m._blocked_cells(m._ring_map()) == {}
+    # на обычной клетке блок образуется
+    m, a, b = duo(FixedRng(2)); a.pieces = [10, 12, 0, 0]
+    m.roll()
+    ev = m.choose(0)
+    assert "block" in kinds(ev) and m._blocked_cells(m._ring_map()) == {11: 0}
+    print("правила образования блоков: OK")
 
 def test_exact_finish():
     m, a, b = duo(); a.pieces = [55, 0, 0, 0]
@@ -194,14 +222,20 @@ def check_invariants(m):
 
 def brute_legal(m, p, d):
     """Независимый расчёт допустимых ходов без ring_index."""
-    blocks = set()
+    cells = {}                                                                # клетка -> {место: число фигур}
     for q in m.players:
-        cnt = {}
         for prog in q.pieces:
             if 1 <= prog <= 51:
                 c = (13 * q.seat + prog - 1) % 52
-                cnt[c] = cnt.get(c, 0) + 1
-        blocks |= {c for c, k in cnt.items() if k >= 2}
+                cells.setdefault(c, {})
+                cells[c][q.seat] = cells[c].get(q.seat, 0) + 1
+    safe = {13 * k for k in range(4)} | {13 * k + 8 for k in range(4)}
+    blocks = {}                                                               # клетка -> владелец блока
+    for c, by in cells.items():
+        if len(by) == 1 and c not in safe:
+            seat, cnt = next(iter(by.items()))
+            if cnt >= 2:
+                blocks[c] = seat
     res = []
     for i, prog in enumerate(p.pieces):
         if prog == 57 or (prog == 0 and d != 6):
@@ -209,7 +243,16 @@ def brute_legal(m, p, d):
         to = 1 if prog == 0 else prog + d
         if to > 57:
             continue
-        if any((13 * p.seat + q - 1) % 52 in blocks for q in range(prog + 1, min(to, 51) + 1)):
+        stop = False
+        for q in range(prog + 1, min(to, 51) + 1):
+            owner = blocks.get((13 * p.seat + q - 1) % 52)
+            if owner is None:
+                continue
+            if owner == p.seat and L.LUDO_PASS_OWN_BLOCKS and q != to:
+                continue
+            stop = True
+            break
+        if stop:
             continue
         res.append(i)
     return res
@@ -258,6 +301,7 @@ def main():
     test_capture_and_safety()
     test_sixes_reset_and_column_block()
     test_blocks()
+    test_block_rules()
     test_exact_finish()
     test_pick_and_auto()
     test_timeouts()
