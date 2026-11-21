@@ -136,7 +136,7 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         if jobs:
             opts = []
             for v in jobs[:25]:
-                lock = "🔒 " if p is not None and T.L.lock_reason(p, v) else ""
+                lock = "🔒 " if p is not None and L.lock_reason(p, v) else ""
                 label = f"{lock}№{v.id} {R.PROFESSIONS[v.prof]['title']} · {T.dur(v.shift_min)}"[:100]
                 desc = f"{v.wage:.0f} м./ч · дорога {v.commute_min} мин"
                 opts.append((label, str(v.id), desc))
@@ -210,7 +210,7 @@ class PanelView(discord.ui.View):
     async def on_error(self, interaction, error, item):
         if is_expired(error):
             return
-        await report_error(interaction, error)
+        await report_error(interaction, error, ephemeral=True)
 
 class ConfirmView(discord.ui.View):
     """Скрытое окно подтверждения. Не постоянное: живёт 2 минуты.
@@ -239,7 +239,7 @@ class ConfirmView(discord.ui.View):
     async def on_error(self, interaction, error, item):
         if is_expired(error):
             return
-        await report_error(interaction, error)
+        await report_error(interaction, error, ephemeral=True)
         self.stop()
 
 def _chunks(items: list, n: int) -> list:

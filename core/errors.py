@@ -15,9 +15,10 @@ TECH_ERROR_TEXT = ("ПРОИЗОШЛА ТЕХНИЧЕСКАЯ ОШИБКА! ПР
                    "И ДОЛОЖИТЬ ПРОИЗОШЕДШЕЕ РАЗРАБОТЧИКУ <@{dev}>")
 
 async def report_error(interaction: discord.Interaction, error: BaseException,
-                       closing_text: Optional[str] = None):
+                       closing_text: Optional[str] = None, ephemeral: bool = False):
     """closing_text: если задан, сообщение с кнопками заменяется этим текстом (сессия закрывается),
-    а извинение уходит отдельным сообщением, чтобы упоминание разработчика сработало."""
+    а извинение уходит отдельным сообщением, чтобы упоминание разработчика сработало.
+    ephemeral=True: извинение видит только нажавший (тег разработчика при этом не пингует)."""
     if is_expired(error):
         log.warning("Нажатие устарело (бот не успел ответить за 3 с): %s", error)
         return
@@ -29,10 +30,10 @@ async def report_error(interaction: discord.Interaction, error: BaseException,
                 await interaction.edit_original_response(content=closing_text, view=None)
             else:
                 await interaction.response.edit_message(content=closing_text, view=None)
-            await interaction.followup.send(text)
+            await interaction.followup.send(text, ephemeral=ephemeral)
         elif interaction.response.is_done():
-            await interaction.followup.send(text)
+            await interaction.followup.send(text, ephemeral=ephemeral)
         else:
-            await interaction.response.send_message(text)
+            await interaction.response.send_message(text, ephemeral=ephemeral)
     except discord.HTTPException:
         log.exception("Не удалось показать сообщение об ошибке в Discord")

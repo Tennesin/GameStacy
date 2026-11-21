@@ -642,29 +642,40 @@ def estimate(p: Player, vac) -> tuple:
     pk = perks(exp_level(p.exp.get(vac.prof, 0.0)))
     shift_h, com_h = vac.shift_min / 60, vac.commute_min / 60
     k = R.LOW_HEALTH_DRAIN_MULT if p.health < R.HEALTH_SLOW else 1.0
-    cost = (abs(R.COMMUTE_ENERGY_RATE) * com_h
-            + abs(vac.rate_energy) * (1 - pk["res_energy"]) * shift_h) * k
+    stamina = buff_power(p, "stamina")
+    res_road = min(R.RES_ENERGY_CAP, stamina)
+    res_work = min(R.RES_ENERGY_CAP, pk["res_energy"] + stamina)
+    cost = (abs(R.COMMUTE_ENERGY_RATE) * (1 - res_road) * com_h
+            + abs(vac.rate_energy) * (1 - res_work) * shift_h) * k
     left = p.energy - cost
     gross = vac.wage * shift_h * happy_mult(p.happiness) * (1 + pk["bonus"])
     return gross, left, left >= R.ENERGY_FORCED
 
+def _shift_chain(p: Player, prof: str, wage: float, shift_min: int, commute_min: int,
+                 rates: dict, perm: bool) -> tuple:
+    """Дорога на работу -> смена -> дорога домой. Возвращает (первая активность, очередь).
+    perm=True: метка постоянной работы (нужна для прогулов и недельной премии)."""
+    pr = R.PROFESSIONS[prof]
+    pk = perks(exp_level(p.exp.get(prof, 0.0)))
+    commute_q = commute_min // R.QUANTUM_MINUTES
+    road = {"energy": R.COMMUTE_ENERGY_RATE}
+    mark = {"perm": True} if perm else {}
+    work = {"kind": "work", "title": pr["title"], "prof": prof, "career": True, "wage": wage,
+            "quanta": shift_min // R.QUANTUM_MINUTES, "done_q": 0, "earned": 0.0, "rates": dict(rates),
+            "bonus": pk["bonus"], "res_neg": pk["res_neg"], "res_energy": pk["res_energy"], **mark}
+    go = {"kind": "commute", "title": f"Дорога на работу ({pr['title']})", "career": True,
+          "quanta": commute_q, "done_q": 0, "rates": dict(road), **mark}
+    home = {"kind": "commute", "title": "Дорога домой", "keep": True,
+            "quanta": commute_q, "done_q": 0, "rates": dict(road), **mark}
+    return go, [work, home]
+
 def start_job(p: Player, vac) -> str:
     """Старт разовой смены: дорога, работа, дорога домой."""
-    pr = R.PROFESSIONS[vac.prof]
-    pk = perks(exp_level(p.exp.get(vac.prof, 0.0)))
-    commute_q = vac.commute_min // R.QUANTUM_MINUTES
-    road = {"energy": R.COMMUTE_ENERGY_RATE}
-    work = {"kind": "work", "title": pr["title"], "prof": vac.prof, "career": True,
-            "wage": vac.wage, "quanta": vac.shift_min // R.QUANTUM_MINUTES, "done_q": 0, "earned": 0.0,
-            "rates": {"energy": vac.rate_energy, "health": vac.rate_health, "happiness": vac.rate_happy},
-            "bonus": pk["bonus"], "res_neg": pk["res_neg"], "res_energy": pk["res_energy"]}
-    go = {"kind": "commute", "title": f"Дорога на работу ({pr['title']})", "career": True,
-          "quanta": commute_q, "done_q": 0, "rates": dict(road)}
-    home = {"kind": "commute", "title": "Дорога домой", "keep": True,
-            "quanta": commute_q, "done_q": 0, "rates": dict(road)}
+    rates = {"energy": vac.rate_energy, "health": vac.rate_health, "happiness": vac.rate_happy}
     p.money -= 2 * vac.fare
-    p.act, p.queue, p.view_vac = go, [work, home], None
-    return f"Вы взяли подработку «{pr['title']}». Вы выехали на работу."
+    p.act, p.queue = _shift_chain(p, vac.prof, vac.wage, vac.shift_min, vac.commute_min, rates, False)
+    p.view_vac = None
+    return f"Вы взяли подработку «{R.PROFESSIONS[vac.prof]['title']}». Вы выехали на работу."
 
 # ---------- Постоянная работа ----------
 

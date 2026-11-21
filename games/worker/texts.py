@@ -5,12 +5,17 @@ from . import logic as L
 from . import market as M
 from . import rules as R
 
-PERK_TEXT = {1: "+2,5% к зарплате", 2: "+1,5% к сопротивлению негативным эффектам",
-             0: "+2% к сопротивлению расходу энергии"}
-SHOW_EVENTS_ON = (
-    "status", "menu", "career", "jobs", "leisure", "market",
-    "venue", "ent", "hospital", "housing", "myjob", "edu"
-)
+def _pct(x: float) -> str:
+    return f"{x * 100:g}".replace(".", ",")
+
+def perk_text(level: int) -> str:
+    """Какой бонус даёт уровень опыта (по кругу: зарплата, негатив, энергия). Числа из rules.py."""
+    kind = level % 3
+    if kind == 1:
+        return f"+{_pct(R.EXP_WAGE_STEP)}% к зарплате"
+    if kind == 2:
+        return f"+{_pct(R.EXP_NEG_STEP)}% к сопротивлению негативным эффектам"
+    return f"+{_pct(R.EXP_ENERGY_STEP)}% к сопротивлению расходу энергии"
 WD_NAMES = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 def bar(value: float) -> str:
@@ -35,7 +40,7 @@ def title_of(prof) -> str:
 def buff_desc(kind: str, power: float) -> str:
     pct = f"{power * 100:.0f}%"
     return {"stamina": f"−{pct} к расходу энергии",
-            "learning": f"+{pct} к скорости опыта и обучения",
+            "learning": f"+{pct} к скорости набора опыта в профессии",
             "recovery": f"+{pct} к восстановлению энергии и здоровья"}[kind]
 
 def effect_text(item: dict) -> str:
@@ -81,9 +86,9 @@ def describe(ev) -> str:
         return text + ("; репутация %+.0f" % d["reputation"] if d["aborted"] else "")
     if k == "level_up":
         return (f"🆙 Опыт «{title_of(d['prof'])}»: уровень {d['level']}! "
-                f"{PERK_TEXT[d['level'] % 3]}")
+                f"{perk_text(d['level'])}")
     if k == "shift_void":
-        return "⌛ Отработано меньше 15 минут: оплаты нет"
+        return f"⌛ Отработано меньше {R.MIN_PAY_MINUTES} минут: оплаты нет"
     if k == "buff_end":
         c = R.COURSES.get(d["code"])
         return f"⏳ Эффект «{c['title'] if c else d['buff']}» закончился"
@@ -188,17 +193,20 @@ def status_text(p, now: datetime, tz) -> str:
 
     warns = []
     if p.health < R.HEALTH_CAREER_BLOCK:
-        warns.append("🚫 Здоровье ниже 25%: карьера и казино заблокированы. Отдохните и поспите.")
+        warns.append(f"🚫 Здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%: карьера и казино заблокированы. "
+                     "Отдохните и поспите.")
     elif p.health < R.HEALTH_SLOW:
-        warns.append("⚠️ Здоровье ниже 65%: энергия тратится вдвое быстрее и восстанавливается вдвое медленнее.")
+        warns.append(f"⚠️ Здоровье ниже {R.HEALTH_SLOW:.0f}%: энергия тратится вдвое быстрее "
+                     "и восстанавливается вдвое медленнее.")
     elif p.health < R.HEALTH_WARN:
-        warns.append("⚠️ Здоровье падает: ниже 65% энергия будет уходить вдвое быстрее.")
+        warns.append(f"⚠️ Здоровье падает: ниже {R.HEALTH_SLOW:.0f}% энергия будет уходить вдвое быстрее.")
     if p.energy < R.ENERGY_FORCED:
         warns.append("⚠️ Энергия на исходе: смены будут прерываться.")
     elif p.energy < R.SLEEP_AVAILABLE_BELOW and p.act is None and not p.venue:
-        warns.append("😴 Энергия ниже 50%: можно лечь спать.")
+        warns.append(f"😴 Энергия ниже {R.SLEEP_AVAILABLE_BELOW:.0f}%: можно лечь спать.")
     if p.venue:
-        warns.append("🛒 Вы в магазине: пока вы здесь, спать и работать нельзя. Нажмите «В магазин» и затем «Уйти».")
+        warns.append("🛒 Вы в магазине: пока вы здесь, спать и работать нельзя. "
+                     "Нажмите «В магазин» и затем «Уйти».")
     if warns:
         lines += [""] + warns
     return "\n".join(lines)
@@ -254,7 +262,8 @@ def ent_text(p) -> str:
 
 def hospital_text(p) -> str:
     lines = ["🏥 **Больница**",
-             "Принудительное лечение (при здоровье ниже 5%) проходит само. Здесь добровольные курсы: "
+             f"Принудительное лечение (при здоровье ниже {R.HEALTH_HOSPITAL:.0f}%) проходит само. "
+             "Здесь добровольные курсы: "
              "они стоят денег, занимают время и дают временный эффект после занятия.", ""]
     bt = buffs_text(p)
     if bt:
@@ -360,14 +369,14 @@ def myjob_text(p, now: datetime, tz) -> str:
         f"проезд: {job['fare']} м. в каждую сторону",
         f"Ставка: {job['wage']:.1f} м./ч (брутто, фиксирована договором) · ваш опыт: уровень {lvl}",
         f"Выходные: {off} · {today}",
-        f"Прогулов: {job['absences']} из {R.JOB_FIRE_ABSENCES} (на третьем увольняют; "
+        f"Прогулов: {job['absences']} из {R.JOB_FIRE_ABSENCES} (на последнем увольняют; "
         "неделя без прогулов снимает один).",
         f"За эту неделю заработано по договору: {money(int(job.get('week_gross', 0)))}; "
         f"недельная премия {R.JOB_WEEK_BONUS * 100:.0f}% выплачивается в воскресенье в полночь, "
         "если не было прогулов и ухода со смены раньше срока.",
         "",
         "Прогул — рабочий день без смены (считается в полночь по Ташкенту). Не прогул: день найма, больница, "
-        "здоровье ниже 25%, принудительный сон.",
+        f"здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%, принудительный сон.",
     ]
     return "\n".join(lines)
 
@@ -420,7 +429,7 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
                 f"• оплата за отработанное ×{R.ABORT_PAY_VOLUNTARY};\n"
                 f"• опыт ×{R.EXP_ABORT_MULT};\n"
                 f"• репутация −{R.REP_ABORT_VOLUNTARY:.0f}.\n"
-                "Дорога домой останется. Если отработано меньше 15 минут, оплаты не будет.")
+                f"Дорога домой останется. Если отработано меньше {R.MIN_PAY_MINUTES} минут, оплаты не будет.")
     elif screen == "leisure":
         text = leisure_text(p)
     elif screen == "market":
