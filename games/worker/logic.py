@@ -99,6 +99,8 @@ class Player:
     last_move: Optional[datetime] = None    # последний переезд
     day_buys: dict = field(default_factory=dict)    # товар -> покупок за игровые сутки
     day_ent: dict = field(default_factory=dict)     # занятие -> квантов за игровые сутки
+    job: Optional[dict] = None              # договор постоянной работы (параметры заморожены на момент найма)
+    job_cooldown: Optional[datetime] = None # до какого момента нельзя нанять новую постоянную
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -114,6 +116,7 @@ class Player:
             "education": list(self.education), "exp": dict(self.exp), "view_vac": self.view_vac,
             "venue": self.venue, "buffs": copy.deepcopy(self.buffs), "last_move": iso(self.last_move),
             "day_buys": dict(self.day_buys), "day_ent": dict(self.day_ent),
+            "job": copy.deepcopy(self.job), "job_cooldown": iso(self.job_cooldown),
         }
 
     @classmethod
@@ -141,6 +144,8 @@ class Player:
         p.last_move = dt(d.get("last_move"))
         p.day_buys = {str(k): int(v) for k, v in (d.get("day_buys") or {}).items()}
         p.day_ent = {str(k): int(v) for k, v in (d.get("day_ent") or {}).items()}
+        p.job = copy.deepcopy(d.get("job"))
+        p.job_cooldown = dt(d.get("job_cooldown"))
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -238,13 +243,15 @@ class Sim:
             if act.get("prof"):                            # опыт: «Концентрация» ускоряет его набор
                 act["xp"] = act.get("xp", 0.0) + 1.0 + buff_power(p, "learning")
 
-        for bk in list(p.buffs):                           # баффы тикают в квантах (заморозка их стопорит)
+        for bk in list(p.buffs):                           # баффы тикают в квантах
             b = p.buffs[bk]
             b["left"] -= 1
             if b["left"] <= 0:
                 del p.buffs[bk]
-                self.emit("buff_end", kind=bk, code=b["code"])
+                self.emit("buff_end", buff=bk, code=b["code"])
 
+        if p.job is not None and p.health < R.HEALTH_CAREER_BLOCK:
+            self._excuse()
         # Проверка порогов (порядок важен)
         if p.health < R.HEALTH_HOSPITAL and kind != "hospital":
             self._hospital()
@@ -275,12 +282,13 @@ class Sim:
     # ----- смена активностей -----
 
     def _next(self):
-        """Берёт следующую активность из очереди; без неё при низкой энергии - принудительный сон."""
+        """Берёт следующую активность из очереди."""
         p = self.p
         p.act = p.queue.pop(0) if p.queue else None
         if p.act is None and p.energy < R.ENERGY_FORCED:
             p.venue = None
             p.act = {"kind": "sleep", "forced": True, "quanta": None, "done_q": 0}
+            self._excuse()                                 # принудительный сон - уважительная причина
             self.emit("forced_sleep")
 
     def _finish(self):
@@ -351,6 +359,10 @@ class Sim:
         p.reputation = clamp(p.reputation + rep)
         self.emit("paid", activity=act["kind"], gross=gross, tax=tax, net=net,
                   reputation=rep, aborted=reason is not None, prof=act.get("prof"))
+        if act.get("perm") and p.job is not None:
+            p.job["week_gross"] = int(p.job.get("week_gross", 0)) + gross
+            if reason == "voluntary":
+                p.job["week_ok"] = False
         self._add_exp(act, reason)
 
     def _add_exp(self, act: dict, reason: Optional[str]):
@@ -417,11 +429,59 @@ class Sim:
             p.happiness = clamp(p.happiness - R.UNPAID_HAPPINESS_LOSS)
             p.health = clamp(p.health - R.UNPAID_HEALTH_LOSS)
         self.emit("daily", cost=cost, paid=paid, short=short)
+        # 2б. Постоянная работа: прогулы, увольнение, недельная премия
+        self._job_day()
         # 3. Пособие: страховка от «спирали смерти»
         if p.health < R.HEALTH_CAREER_BLOCK and p.money < R.BENEFIT_BELOW_MONEY:
             p.money += R.BENEFIT_AMOUNT
             self.emit("benefit", amount=R.BENEFIT_AMOUNT)
         p.reputation = clamp(p.reputation)
+
+    def _excuse(self):
+        """Отмечает уважительную причину для текущих суток (прогула за них не будет)."""
+        job = self.p.job
+        if job is not None:
+            day = (self.p.updated - timedelta(seconds=1)).astimezone(self.tz).date()
+            job["excused_day"] = day.isoformat()
+
+    def _job_day(self):
+        """Конец суток для постоянной работы. Вызывается из _daily, p.updated - ровно полночь."""
+        p = self.p
+        job = p.job
+        if job is None:
+            return
+        ended = (p.updated - timedelta(seconds=1)).astimezone(self.tz).date()   # сутки, которые закончились
+        ended_s = ended.isoformat()
+        today_s = (ended + timedelta(days=1)).isoformat()
+
+        absent = (ended.weekday() not in job["days_off"]
+                  and job.get("worked_day") != ended_s
+                  and job.get("excused_day") != ended_s
+                  and job.get("hired_day") != ended_s)
+        if absent:
+            job["absences"] = int(job.get("absences", 0)) + 1
+            job["week_ok"] = False
+            p.reputation -= R.JOB_ABSENCE_REP
+            self.emit("absence", absences=job["absences"], limit=R.JOB_FIRE_ABSENCES)
+            if job["absences"] >= R.JOB_FIRE_ABSENCES:
+                p.job = None
+                p.job_cooldown = p.updated + timedelta(hours=R.JOB_HIRE_COOLDOWN_HOURS)
+                self.emit("fired", prof=job["prof"])
+                return
+
+        # смена, идущая в полночь, засчитывается и новым суткам (дорога домой - нет)
+        if p.act and p.act.get("perm") and not p.act.get("keep"):
+            job["worked_day"] = today_s
+
+        if ended.weekday() == 6:                           # воскресенье закончилось: итог недели
+            gross = int(round(int(job.get("week_gross", 0)) * R.JOB_WEEK_BONUS))
+            if job.get("week_ok", True) and gross > 0:
+                tax = self._tax(gross)
+                p.money += gross - tax
+                self.emit("week_bonus", gross=gross, tax=tax, net=gross - tax)
+            if job.get("week_ok", True) and job.get("absences", 0) > 0:
+                job["absences"] -= 1                       # неделя без прогулов «прощает» один прогул
+            job["week_gross"], job["week_ok"] = 0, True
 
 # ---------- Публичные функции ----------
 
@@ -527,6 +587,12 @@ def can_take(p: Player, vac, now_ts: int) -> tuple:
     why = lock_reason(p, vac)
     if why:
         return False, "Вакансия недоступна: " + why + "."
+    if vac.kind == "perm":                             # договор подписывается без смены и дороги
+        if p.job is not None:
+            return False, "У вас уже есть постоянная работа: сначала увольтесь."
+        if p.job_cooldown and p.job_cooldown.timestamp() > now_ts:
+            return False, f"После ухода с работы нужно подождать: новую можно взять <t:{int(p.job_cooldown.timestamp())}:R>."
+        return True, ""
     if p.act is not None or p.queue:
         return False, "Сейчас вы заняты."
     if career_blocked(p):
@@ -565,6 +631,80 @@ def start_job(p: Player, vac) -> str:
     p.money -= 2 * vac.fare
     p.act, p.queue, p.view_vac = go, [work, home], None
     return f"Вы взяли подработку «{pr['title']}». Вы выехали на работу."
+
+# ---------- Постоянная работа ----------
+
+def sign_contract(p: Player, vac, now: datetime, tz: tzinfo) -> str:
+    """Подписывает договор: параметры вакансии замораживаются. Вызывать после can_take и claim_vacancy."""
+    pr = R.PROFESSIONS[vac.prof]
+    p.job = {
+        "prof": vac.prof, "wage": vac.wage, "shift_min": vac.shift_min, "commute_min": vac.commute_min,
+        "rate_energy": vac.rate_energy, "rate_health": vac.rate_health, "rate_happy": vac.rate_happy,
+        "fare": vac.fare, "days_off": list(vac.days_off),
+        "hired_day": now.astimezone(tz).date().isoformat(),
+        "absences": 0, "week_gross": 0, "week_ok": True, "worked_day": None, "excused_day": None,
+    }
+    p.view_vac = None
+    return (f"Вы устроились: «{pr['title']}». Договор подписан, условия больше не меняются. "
+            "Сегодня прогула не будет; выходите на смену в разделе «Моя работа».")
+
+def can_start_shift(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    job = p.job
+    if job is None:
+        return False, "У вас нет постоянной работы."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
+    if career_blocked(p):
+        return False, f"Здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%: карьера заблокирована."
+    local = now.astimezone(tz)
+    if local.weekday() in job["days_off"]:
+        return False, "Сегодня у вас выходной."
+    if job.get("worked_day") == local.date().isoformat():
+        return False, "Сегодня вы уже выходили на смену."
+    if p.energy < R.MIN_START_ENERGY:
+        return False, f"Мало сил: на смену можно выйти при энергии не ниже {R.MIN_START_ENERGY:.0f}%."
+    if p.money < 2 * job["fare"]:
+        return False, f"Не хватает денег на проезд ({2 * job['fare']} м. туда и обратно)."
+    return True, ""
+
+def start_shift(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    """Смена по договору: дорога, работа, дорога домой. Метка perm нужна для прогулов и премии."""
+    ok, why = can_start_shift(p, now, tz)
+    if not ok:
+        return False, why
+    job = p.job
+    pr = R.PROFESSIONS[job["prof"]]
+    pk = perks(exp_level(p.exp.get(job["prof"], 0.0)))
+    commute_q = job["commute_min"] // R.QUANTUM_MINUTES
+    road = {"energy": R.COMMUTE_ENERGY_RATE}
+    work = {"kind": "work", "title": pr["title"], "prof": job["prof"], "career": True, "perm": True,
+            "wage": job["wage"], "quanta": job["shift_min"] // R.QUANTUM_MINUTES, "done_q": 0, "earned": 0.0,
+            "rates": {"energy": job["rate_energy"], "health": job["rate_health"],
+                      "happiness": job["rate_happy"]},
+            "bonus": pk["bonus"], "res_neg": pk["res_neg"], "res_energy": pk["res_energy"]}
+    go = {"kind": "commute", "title": f"Дорога на работу ({pr['title']})", "career": True, "perm": True,
+          "quanta": commute_q, "done_q": 0, "rates": dict(road)}
+    home = {"kind": "commute", "title": "Дорога домой", "keep": True, "perm": True,
+            "quanta": commute_q, "done_q": 0, "rates": dict(road)}
+    p.money -= 2 * job["fare"]
+    p.act, p.queue = go, [work, home]
+    job["worked_day"] = now.astimezone(tz).date().isoformat()
+    return True, f"Вы вышли на смену: «{pr['title']}»."
+
+def quit_job(p: Player, now: datetime) -> tuple:
+    """Увольнение по желанию. Во время смены нельзя. После ухода действует кулдаун найма."""
+    if p.job is None:
+        return False, "У вас нет постоянной работы."
+    if p.frozen_at is not None:
+        return False, "Игра заморожена."
+    if p.act and p.act.get("career"):
+        return False, "Сначала закончите смену."
+    p.job = None
+    p.job_cooldown = now + timedelta(hours=R.JOB_HIRE_COOLDOWN_HOURS)
+    return True, f"Вы уволились. Новую постоянную работу можно взять через {R.JOB_HIRE_COOLDOWN_HOURS} ч."
 
 # ---------- Общее для досуга ----------
 

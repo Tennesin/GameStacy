@@ -439,6 +439,71 @@ def test_snapshot_stage2():
     assert L.Player.restore(snap).snapshot() == p.snapshot()
     print("снимок этапа 2: OK")
 
+# ---------- Этап 4 ----------
+
+def make_perm(off=(5, 6)) -> M.Vacancy:
+    v = make_vac("loader", 4, kind="perm")
+    v.days_off = tuple(off)
+    v.expires_ts = TS0 + 10 ** 7
+    return v
+
+def test_permanent():
+    # найм и день найма без прогула
+    p = L.new_player(1, T0)                                  # T0: вторник 09:00
+    assert L.can_take(p, make_perm(), TS0)[0]
+    L.sign_contract(p, make_perm(), T0, TZ)
+    assert p.job and p.job["days_off"] == [5, 6]
+    assert not L.can_take(p, make_perm(), TS0)[0]            # вторая работа сразу нельзя
+    assert "absence" not in kinds(L.catch_up(p, at(16), TZ))
+
+    # среда без смены: прогул
+    ev = L.catch_up(p, at(40), TZ)
+    assert kinds(ev).count("absence") == 1 and p.job["absences"] == 1
+    assert p.reputation < R.START_REPUTATION
+
+    # четверг: смена, прогула нет, копится недельная сумма
+    assert L.start_shift(p, at(40), TZ)[0]
+    assert not L.start_shift(p, at(40), TZ)[0]               # уже занят / уже работал
+    ev = L.catch_up(p, at(64), TZ)
+    assert "paid" in kinds(ev) and "absence" not in kinds(ev) and p.job["week_gross"] > 0
+
+    # три прогула: увольнение и кулдаун
+    q = L.new_player(2, T0)
+    L.sign_contract(q, make_perm(), T0, TZ)
+    ks = kinds(L.catch_up(q, at(90), TZ))
+    assert ks.count("absence") == 3 and "fired" in ks and q.job is None and q.job_cooldown
+    assert not L.can_take(q, make_perm(), int(at(90).timestamp()))[0]
+    assert L.can_take(q, make_perm(), int(at(103).timestamp()))[0]
+
+    # уважительная причина: больница
+    r = L.new_player(3, T0)
+    L.sign_contract(r, make_perm(), T0, TZ)
+    L.catch_up(r, at(16), TZ)
+    r.health = 4.0
+    ks = kinds(L.catch_up(r, at(40), TZ))
+    assert "hospital" in ks and "absence" not in ks and r.job["absences"] == 0
+
+    # заморозка: полуночи не обрабатываются
+    f = L.new_player(4, T0)
+    L.sign_contract(f, make_perm(), T0, TZ)
+    assert L.freeze(f, T0, TZ)[0]
+    assert L.catch_up(f, at(200), TZ) == [] and f.job["absences"] == 0
+
+    # недельная премия (все дни выходные, чтобы не было прогулов)
+    w = L.new_player(5, T0)
+    L.sign_contract(w, make_perm((0, 1, 2, 3, 4, 5, 6)), T0, TZ)
+    w.job["week_gross"] = 1000
+    ev = L.catch_up(w, at(136), TZ)                          # воскресенье закончилось в at(135)
+    b = next(e for e in ev if e.kind == "week_bonus")
+    assert b.data["gross"] == 100 and b.data["tax"] == 10 and w.job["week_gross"] == 0
+
+    # увольнение по желанию
+    assert L.quit_job(w, at(140))[0] and w.job is None and w.job_cooldown
+
+    # снимок
+    assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
+    print("постоянная работа: OK")
+
 def main():
     test_tax()
     test_sleep()
@@ -460,6 +525,7 @@ def main():
     test_buffs()
     test_leisure()
     test_snapshot_stage2()
+    test_permanent()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

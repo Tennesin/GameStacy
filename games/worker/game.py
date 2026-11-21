@@ -138,7 +138,25 @@ class WorkerController:
             if not store.claim_vacancy(v.id, p.uid, ts):
                 p.view_vac = None
                 return "jobs", "Эту вакансию только что забрали."
+            if v.kind == "perm":
+                return "myjob", L.sign_contract(p, v, now, TZ)
             return "status", L.start_job(p, v)
+
+        # ----- постоянная работа -----
+        if action == "myjob":
+            return "myjob", ""
+        if action == "shift_go":
+            ok, msg = L.start_shift(p, now, TZ)
+            return ("status" if ok else "myjob"), msg
+        if action == "quit":
+            if p.job is None:
+                return "myjob", "У вас нет постоянной работы."
+            if p.act and p.act.get("career"):
+                return "myjob", "Сначала закончите смену."
+            return "quit_confirm", ""
+        if action == "quit_yes":
+            ok, msg = L.quit_job(p, now)
+            return "myjob", msg
 
         if action == "abort":
             if p.act and p.act.get("career"):

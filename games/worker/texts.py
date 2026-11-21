@@ -7,7 +7,10 @@ from . import rules as R
 
 PERK_TEXT = {1: "+2,5% к зарплате", 2: "+1,5% к сопротивлению негативным эффектам",
              0: "+2% к сопротивлению расходу энергии"}
-SHOW_EVENTS_ON = ("status", "menu", "career", "jobs", "leisure", "market", "venue", "ent", "hospital", "housing")
+SHOW_EVENTS_ON = (
+    "status", "menu", "career", "jobs", "leisure", "market",
+    "venue", "ent", "hospital", "housing", "myjob")
+WD_NAMES = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 def bar(value: float) -> str:
     n = int(round(max(0.0, min(100.0, value)) / 10))
@@ -77,7 +80,7 @@ def describe(ev) -> str:
         return "⌛ Отработано меньше 15 минут: оплаты нет"
     if k == "buff_end":
         c = R.COURSES.get(d["code"])
-        return f"⏳ Эффект «{c['title'] if c else d['kind']}» закончился"
+        return f"⏳ Эффект «{c['title'] if c else d['buff']}» закончился"
     if k == "finished":
         if d["activity"] == "sleep":
             return "⏰ Вы проснулись"
@@ -95,6 +98,15 @@ def describe(ev) -> str:
             c = R.COURSES[d["course"]]
             return (f"🎓 Курс «{c['title']}» закончен: {buff_desc(c['kind'], c['power'])} "
                     f"на {c['hours']} ч")
+    if k == "absence":
+        return (f"🚫 Прогул на постоянной работе ({d['absences']} из {d['limit']}): "
+                "репутация снижена, недельная премия сгорела")
+    if k == "fired":
+        return (f"📤 Вас уволили за прогулы («{title_of(d['prof'])}»). "
+                f"Новую постоянную работу можно взять через {R.JOB_HIRE_COOLDOWN_HOURS} ч")
+    if k == "week_bonus":
+        return (f"🎁 Недельная премия: начислено {money(d['gross'])}, НДФЛ {money(d['tax'])}, "
+                f"на руки {money(d['net'])}")
     return None
 
 def activity_text(p) -> str:
@@ -143,6 +155,9 @@ def status_text(p, now: datetime, tz) -> str:
                          "Чем дольше долг не гасится, тем хуже репутация и настроение.")
     lines.append(f"🏠 {h['title']} (счастье тянется к {h['base']:.0f}%) · "
                  f"🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
+    if p.job:
+        lines.append(f"💼 Постоянная работа: {title_of(p.job['prof'])} "
+                     f"(прогулов {p.job['absences']} из {R.JOB_FIRE_ABSENCES})")
     exps = [f"{title_of(k)} — ур. {L.exp_level(v)}" for k, v in p.exp.items() if L.exp_level(v) > 0]
     if exps:
         lines += ["", "🛠 **Опыт:** " + ", ".join(exps)]
@@ -299,9 +314,47 @@ def job_text(p, v, now: datetime) -> str:
     else:
         lines.append(f"⚠️ Вы вряд ли доработаете: прикидка энергии к концу смены {left:.0f}%, "
                      f"а ниже {R.ENERGY_FORCED:.0f}% смену прервут (оплата снизится, репутация упадёт).")
+    if v.kind == "perm":
+        off = ", ".join(WD_NAMES[x] for x in v.days_off) or "нет"
+        lines.insert(3, f"Выходные: {off}. После подписания договора условия не меняются; "
+                        f"{R.JOB_FIRE_ABSENCES} прогула — увольнение.")
     ok, why = L.can_take(p, v, int(now.timestamp()))
     if not ok:
         lines.append(f"🚫 Сейчас взять нельзя: {why}")
+    return "\n".join(lines)
+
+def myjob_text(p, now: datetime, tz) -> str:
+    job = p.job
+    if job is None:
+        lines = ["📑 **Моя работа**",
+                 "У вас нет постоянной работы. Договор можно подписать на рынке вакансий (раздел «Работа»)."]
+        if p.job_cooldown and now < p.job_cooldown:
+            lines.append(f"Новую постоянную работу можно взять {ts(p.job_cooldown)}.")
+        return "\n".join(lines)
+    local = now.astimezone(tz)
+    off = ", ".join(WD_NAMES[x] for x in job["days_off"]) or "нет"
+    if local.weekday() in job["days_off"]:
+        today = "сегодня выходной"
+    elif job.get("worked_day") == local.date().isoformat():
+        today = "сегодня вы уже выходили на смену"
+    else:
+        today = "сегодня рабочий день: можно выходить на смену"
+    lvl = L.exp_level(p.exp.get(job["prof"], 0.0))
+    lines = [
+        f"📑 **Моя работа: {title_of(job['prof'])}**",
+        f"Смена: {dur(job['shift_min'])} · дорога в одну сторону: {dur(job['commute_min'])} · "
+        f"проезд: {job['fare']} м. в каждую сторону",
+        f"Ставка: {job['wage']:.1f} м./ч (брутто, фиксирована договором) · ваш опыт: уровень {lvl}",
+        f"Выходные: {off} · {today}",
+        f"Прогулов: {job['absences']} из {R.JOB_FIRE_ABSENCES} (на третьем увольняют; "
+        "неделя без прогулов снимает один).",
+        f"За эту неделю заработано по договору: {money(int(job.get('week_gross', 0)))}; "
+        f"недельная премия {R.JOB_WEEK_BONUS * 100:.0f}% выплачивается в воскресенье в полночь, "
+        "если не было прогулов и ухода со смены раньше срока.",
+        "",
+        "Прогул — рабочий день без смены (считается в полночь по Ташкенту). Не прогул: день найма, больница, "
+        "здоровье ниже 25%, принудительный сон.",
+    ]
     return "\n".join(lines)
 
 def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
@@ -311,9 +364,8 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = ("💼 **Симулятор рабочего**\n"
                 f"💰 {money(p.money)} · ⚡ {p.energy:.0f}% · ❤️ {p.health:.0f}% · {activity_text(p)}\n\n"
                 "Выберите раздел. Игра идёт в реальном времени, даже когда вы не в сети.")
-    elif screen == "career":
-        text = ("💼 **Карьера**\nРабота: берите подработки на общем рынке вакансий. "
-                "Образование и биржа появятся позже.")
+        text = ("💼 **Карьера**\nРабота: подработки и постоянные места на общем рынке вакансий; "
+                "«Моя работа» — ваш договор и выход на смену.")
     elif screen == "jobs":
         text = jobs_text(p, jobs or [], now, tz)
     elif screen == "job" and vac is not None:
@@ -346,6 +398,12 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
                 f"• Разморозить можно не раньше чем через {R.FREEZE_MIN_HOURS} ч.\n"
                 f"• После разморозки повторная заморозка доступна через {R.FREEZE_COOLDOWN_DAYS} сут.\n"
                 "• Во время смены, учёбы и лечения заморозка недоступна.")
+    elif screen == "myjob":
+        text = myjob_text(p, now, tz)
+    elif screen == "quit_confirm":
+        text = ("📤 **Уволиться?**\n"
+                f"После ухода новую постоянную работу можно взять только через {R.JOB_HIRE_COOLDOWN_HOURS} ч. "
+                "Недельная премия за текущую неделю сгорит. Вакансия обратно на рынок не вернётся.")
     else:
         text = status_text(p, now, tz)
     lines = [text]

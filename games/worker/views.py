@@ -36,6 +36,8 @@ ALL_SPECS = [
     Spec("go_food", "🥖 Продукты", PRIMARY, 3), Spec("go_pharm", "💊 Аптека", PRIMARY, 3),
     Spec("go_super", "🛍 Супермаркет", PRIMARY, 3), Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 3),
     Spec("stop_leisure", "🏁 Закончить досуг", PRIMARY, 3),
+    Spec("myjob", "📑 Моя работа", PRIMARY, 0), Spec("shift_go", "▶ Выйти на смену", SUCCESS, 0),
+    Spec("quit", "📤 Уволиться", DANGER, 0), Spec("quit_yes", "✅ Да, уволиться", DANGER, 0),
     Spec("sleep", "Сколько спать?", None, 3, "select"),
     Spec("job_pick", "Выберите вакансию", None, 4, "select"),
     Spec("buy", "Что купить?", None, 4, "select"),
@@ -82,7 +84,15 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return [Spec("career", "💼 Карьера", PRIMARY, 0), Spec("leisure", "🎭 Досуг", PRIMARY, 0),
                 Spec("status", "📋 Моё состояние", SECONDARY, 0)]
     if screen == "career":
-        return [Spec("jobs", "🔨 Работа", PRIMARY, 0), Spec("menu", "◀ Назад", SECONDARY, 0)]
+        return [Spec("jobs", "🔨 Работа", PRIMARY, 0), Spec("myjob", "📑 Моя работа", PRIMARY, 0),
+                Spec("menu", "◀ Назад", SECONDARY, 0)]
+    if screen == "myjob":
+        specs = []
+        if p is not None and p.job is not None:
+            specs += [Spec("shift_go", "▶ Выйти на смену", SUCCESS, 0), Spec("quit", "📤 Уволиться", DANGER, 0)]
+        return specs + [Spec("career", "◀ Назад", SECONDARY, 1)]
+    if screen == "quit_confirm":
+        return [Spec("quit_yes", "✅ Да, уволиться", DANGER, 0), Spec("myjob", "Отмена", SECONDARY, 0)]
     if screen == "leisure":
         return [Spec("market", "🛒 Рынок", PRIMARY, 0), Spec("ent", "🎭 Развлечения", PRIMARY, 0),
                 Spec("nav_hosp", "🏥 Больница", PRIMARY, 0), Spec("housing", "🏠 Жильё", PRIMARY, 0),
