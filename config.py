@@ -33,7 +33,7 @@ BUMP_AFTER_MESSAGES = 3    # сколько чужих сообщений под
 BUMP_LOOKAHEAD = 20        # сколько сообщений под табло просматривать (свои тоже попадают в выборку)
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
 GAMES = [
-    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo"
+    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo", "games.worker"
 ]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

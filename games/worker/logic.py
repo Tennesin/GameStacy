@@ -1,0 +1,457 @@
+"""Чистая логика симулятора рабочего: время, показатели, активности, суточные события, налог, заморозка.
+Про Discord и БД ничего не знает.
+
+Принцип: «ленивая симуляция». Состояние игрока хранится вместе с моментом, до которого оно рассчитано
+(Player.updated, всегда на сетке по 5 минут). Перед любым действием вызывается catch_up(p, now, tz):
+она проходит квантами от Player.updated до now и применяет эффекты. Результат не зависит от того,
+сколько раз и в какие моменты её вызывали.
+
+Активность (Player.act) - словарь, длительность в КВАНТАХ (поэтому заморозка не требует пересчёта дат):
+  kind      "sleep" / "hospital" / любой другой (работа, учёба, дорога...)
+  quanta    сколько квантов осталось (None - пока не сработает условие окончания, как у сна)
+  rates     {"energy", "health", "happiness"} в час; отрицательные значения смягчаются res_neg / res_energy
+  career    True: прерывается при энергии ниже ENERGY_FORCED и здоровье ниже HEALTH_CAREER_BLOCK
+  keep      True: при прерывании остаётся в очереди (например, «дорога домой»)
+  wage      ставка в час (брутто); earned копится сама, оплата и налог - при завершении
+  bonus     добавка к зарплате (опыт), res_neg, res_energy - сопротивления (опыт)
+Очередь Player.queue - активности, которые начнутся одна за другой."""
+import copy
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, time as dtime, timedelta, timezone, tzinfo
+from typing import Optional
+
+from . import rules as R
+
+UTC = timezone.utc
+QUANTUM = timedelta(minutes=R.QUANTUM_MINUTES)
+QH = R.QUANTUM_MINUTES / 60.0          # доля часа в одном кванте
+
+# ---------- Мелочи ----------
+
+def clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, v))
+
+def floor_q(dt: datetime) -> datetime:
+    """Округление вниз до сетки квантов (общей для всех игроков)."""
+    step = R.QUANTUM_MINUTES * 60
+    ts = int(dt.timestamp())
+    return datetime.fromtimestamp(ts - ts % step, tz=UTC)
+
+def next_midnight(dt: datetime, tz: tzinfo) -> datetime:
+    """Ближайшая полночь по местному времени строго после dt (UTC)."""
+    local = dt.astimezone(tz)
+    nxt = datetime.combine(local.date() + timedelta(days=1), dtime.min, tzinfo=tz)
+    return nxt.astimezone(UTC)
+
+def happy_mult(happiness: float) -> float:
+    """Множитель продуктивности: 0% -> 0.7, 50% -> 1.0, 100% -> 1.1."""
+    if happiness <= 50:
+        return R.HAPPY_MULT_MIN + (1.0 - R.HAPPY_MULT_MIN) * happiness / 50
+    return 1.0 + (R.HAPPY_MULT_MAX - 1.0) * (happiness - 50) / 50
+
+def income_tax(income: int) -> int:
+    """Налог со всего дохода за неделю по ступенчатой шкале (ставка действует только на свою часть)."""
+    tax, low = 0.0, 0
+    for limit, rate in R.TAX_BRACKETS:
+        top = income if limit is None else min(income, limit)
+        if top > low:
+            tax += (top - low) * rate
+        if limit is None or income <= limit:
+            break
+        low = limit
+    return int(round(tax))
+
+# ---------- Данные ----------
+
+@dataclass
+class Event:
+    kind: str
+    at: Optional[datetime] = None
+    data: dict = field(default_factory=dict)
+
+@dataclass
+class Player:
+    uid: int
+    updated: datetime                       # состояние рассчитано до этого момента (UTC, сетка квантов)
+    energy: float = R.START_ENERGY
+    health: float = R.START_HEALTH
+    happiness: float = R.START_HAPPINESS
+    reputation: float = R.START_REPUTATION
+    money: int = R.START_MONEY
+    debt: int = 0
+    debt_principal: int = 0                 # сколько из долга - «тело» (проценты рассчитываются от лимита по нему)
+    debt_pressure: int = 0                  # «звонки», 0..10
+    debt_paid_today: bool = False
+    housing: str = R.START_HOUSING
+    food: str = R.START_FOOD
+    act: Optional[dict] = None              # текущая активность; None - свободен
+    queue: list = field(default_factory=list)
+    frozen_at: Optional[datetime] = None
+    last_unfreeze: Optional[datetime] = None
+    week_start: Optional[str] = None        # понедельник текущей налоговой недели (ISO)
+    week_income: int = 0                    # доход (брутто) за эту неделю
+
+    def snapshot(self) -> dict:
+        iso = lambda v: v.isoformat() if v else None
+        return {
+            "uid": self.uid, "updated": iso(self.updated),
+            "energy": self.energy, "health": self.health, "happiness": self.happiness,
+            "reputation": self.reputation, "money": self.money, "debt": self.debt,
+            "debt_principal": self.debt_principal, "debt_pressure": self.debt_pressure,
+            "debt_paid_today": self.debt_paid_today, "housing": self.housing, "food": self.food,
+            "act": copy.deepcopy(self.act), "queue": copy.deepcopy(self.queue),
+            "frozen_at": iso(self.frozen_at), "last_unfreeze": iso(self.last_unfreeze),
+            "week_start": self.week_start, "week_income": self.week_income,
+        }
+
+    @classmethod
+    def restore(cls, d: dict) -> "Player":
+        """Читает и старые снимки: новых полей нет - берутся значения по умолчанию."""
+        dt = lambda v: datetime.fromisoformat(v) if v else None
+        p = cls(uid=int(d["uid"]), updated=dt(d["updated"]))
+        for k in ("energy", "health", "happiness", "reputation"):
+            setattr(p, k, float(d.get(k, getattr(p, k))))
+        for k in ("money", "debt", "debt_principal", "debt_pressure", "week_income"):
+            setattr(p, k, int(d.get(k, getattr(p, k))))
+        p.debt_paid_today = bool(d.get("debt_paid_today", False))
+        p.housing = d.get("housing", p.housing)
+        p.food = d.get("food", p.food)
+        p.act = copy.deepcopy(d.get("act"))
+        p.queue = copy.deepcopy(d.get("queue") or [])
+        p.frozen_at = dt(d.get("frozen_at"))
+        p.last_unfreeze = dt(d.get("last_unfreeze"))
+        p.week_start = d.get("week_start")
+        return p
+
+def new_player(uid: int, now: datetime) -> Player:
+    return Player(uid=uid, updated=floor_q(now))
+
+def daily_cost(p: Player) -> int:
+    return R.HOUSING[p.housing]["rent"] + R.FOOD[p.food]["cost"]
+
+def career_blocked(p: Player) -> bool:
+    """Карьера (и казино) недоступны по здоровью."""
+    return p.health < R.HEALTH_CAREER_BLOCK
+
+def act_end(p: Player) -> Optional[datetime]:
+    """Когда закончится текущая активность (None - свободен или срок заранее неизвестен)."""
+    if p.act and p.act.get("quanta") is not None:
+        return p.updated + p.act["quanta"] * QUANTUM
+    return None
+
+# ---------- Симуляция ----------
+
+class Sim:
+    """Один прогон расчёта над игроком; копит события."""
+
+    def __init__(self, p: Player, tz: tzinfo):
+        self.p, self.tz, self.events = p, tz, []
+
+    def emit(self, kind: str, **data):
+        self.events.append(Event(kind, self.p.updated, data))
+
+    # ----- основной цикл -----
+
+    def run(self, until: datetime):
+        p = self.p
+        if p.frozen_at is not None:
+            return                                         # заморожен: время для него не идёт
+        midnight = next_midnight(p.updated, self.tz)
+        while p.updated < until:
+            p.updated += QUANTUM
+            self._step()
+            if p.updated >= midnight:                      # квант закончился в полночь
+                self._daily()
+                midnight = next_midnight(p.updated, self.tz)
+
+    def _step(self):
+        p, act = self.p, self.p.act
+        kind = act["kind"] if act else "free"
+        home = R.HOUSING[p.housing]
+        if kind == "sleep":
+            rates = {"energy": R.SLEEP_ENERGY_RATE * home["sleep"],
+                     "health": R.SLEEP_HEALTH_RATE * home["heal"]}
+        elif kind == "hospital":
+            rates = {}
+        elif act:
+            rates = act.get("rates", {})
+        else:
+            rates = {"energy": R.FREE_ENERGY_RATE, "health": R.FREE_HEALTH_RATE}
+        res_neg = act.get("res_neg", 0.0) if act else 0.0
+        res_energy = act.get("res_energy", 0.0) if act else 0.0
+        low = p.health < R.HEALTH_SLOW
+        mult = happy_mult(p.happiness)
+
+        e = rates.get("energy", 0.0)
+        if e < 0:
+            e *= 1 - res_energy
+            if low:
+                e *= R.LOW_HEALTH_DRAIN_MULT
+        elif e > 0 and low:
+            e *= R.LOW_HEALTH_REGEN_MULT
+        hl = rates.get("health", 0.0)
+        if hl < 0:
+            hl *= 1 - res_neg
+        if p.energy <= 0 and kind != "hospital":
+            hl -= R.ZERO_ENERGY_HEALTH_LOSS
+        hp = rates.get("happiness", 0.0)
+        if hp < 0:
+            hp *= 1 - res_neg
+        hp += (home["base"] - p.happiness) * R.HAPPY_SPRING - R.DEBT_PRESSURE_HAPPY * p.debt_pressure
+
+        p.energy = clamp(p.energy + e * QH)
+        p.health = clamp(p.health + hl * QH)
+        p.happiness = clamp(p.happiness + hp * QH)
+
+        if act:
+            act["done_q"] = act.get("done_q", 0) + 1
+            if act.get("quanta") is not None:
+                act["quanta"] -= 1
+            if act.get("wage"):
+                act["earned"] = act.get("earned", 0.0) + act["wage"] * QH * mult * (1 + act.get("bonus", 0.0))
+
+        # Проверка порогов (порядок важен)
+        if p.health < R.HEALTH_HOSPITAL and kind != "hospital":
+            self._hospital()
+            return
+        if act is None:
+            return
+        if self._done(act):
+            self._finish()
+            return
+        if act.get("career") and (p.energy < R.ENERGY_FORCED or p.health < R.HEALTH_CAREER_BLOCK):
+            self._interrupt("forced", "energy" if p.energy < R.ENERGY_FORCED else "health")
+
+    def _done(self, act: dict) -> bool:
+        p = self.p
+        if act["kind"] == "sleep":
+            if act.get("forced"):
+                return p.energy >= R.ENERGY_FORCED_WAKE
+            if p.energy >= 100.0:
+                return True
+        return act.get("quanta") is not None and act["quanta"] <= 0
+
+    # ----- смена активностей -----
+
+    def _next(self):
+        """Берёт следующую активность из очереди; без неё при низкой энергии - принудительный сон."""
+        p = self.p
+        p.act = p.queue.pop(0) if p.queue else None
+        if p.act is None and p.energy < R.ENERGY_FORCED:
+            p.act = {"kind": "sleep", "forced": True, "quanta": None, "done_q": 0}
+            self.emit("forced_sleep")
+
+    def _finish(self):
+        p, act = self.p, self.p.act
+        self._settle(act, None)
+        data = {"activity": act["kind"]}
+        if act["kind"] == "hospital":
+            p.health = act["discharge_health"]
+            p.energy = 100.0
+            data["health"] = p.health
+        self.emit("finished", **data)
+        p.act = None
+        self._next()
+
+    def _interrupt(self, reason: str, why: str):
+        """Досрочное завершение (срыв). reason: forced / voluntary."""
+        p, act = self.p, self.p.act
+        self._settle(act, reason)
+        self.emit("interrupted", activity=act["kind"], why=why, reason=reason)
+        p.queue = [a for a in p.queue if a.get("keep")]
+        p.act = None
+        self._next()
+
+    # ----- деньги -----
+
+    def _add_debt(self, amount: int):
+        self.p.debt += amount
+        self.p.debt_principal += amount
+
+    def _tax(self, gross: int) -> int:
+        """Налог с этой выплаты: разность налога недельного дохода после и до неё."""
+        p = self.p
+        local = p.updated.astimezone(self.tz).date()
+        monday = (local - timedelta(days=local.weekday())).isoformat()
+        if p.week_start != monday:
+            p.week_start, p.week_income = monday, 0
+        tax = income_tax(p.week_income + gross) - income_tax(p.week_income)
+        p.week_income += gross
+        return tax
+
+    def _settle(self, act: dict, reason: Optional[str]):
+        """Оплата активности с зарплатой. reason: None (штатно), forced, voluntary."""
+        if not act.get("wage"):
+            return
+        p = self.p
+        minutes = act.get("done_q", 0) * R.QUANTUM_MINUTES
+        if minutes < R.MIN_PAY_MINUTES:
+            self.emit("shift_void", activity=act["kind"])
+            return
+        if reason is None:
+            k = 1.0
+        else:
+            k = R.ABORT_PAY_FORCED if reason == "forced" else R.ABORT_PAY_VOLUNTARY
+        gross = int(round(act.get("earned", 0.0) * k))
+        tax = self._tax(gross)
+        net = gross - tax
+        p.money += net
+        if reason is None:
+            rep = min(R.REP_PER_HOUR * minutes / 60, R.REP_SHIFT_MAX)
+        else:
+            rep = -(R.REP_ABORT_FORCED if reason == "forced" else R.REP_ABORT_VOLUNTARY)
+        p.reputation = clamp(p.reputation + rep)
+        self.emit("paid", activity=act["kind"], gross=gross, tax=tax, net=net,
+                  reputation=rep, aborted=reason is not None)
+
+    # ----- больница -----
+
+    def _hospital(self):
+        p = self.p
+        if p.act:
+            self._settle(p.act, "forced")
+        p.queue = []
+        debt = 0
+        if p.money >= R.HOSPITAL_FULL_COST:
+            cost, hours, health = R.HOSPITAL_FULL_COST, R.HOSPITAL_FULL_HOURS, R.HOSPITAL_FULL_HEALTH
+        elif p.money >= R.HOSPITAL_LIGHT_COST:
+            cost, hours, health = R.HOSPITAL_LIGHT_COST, R.HOSPITAL_LIGHT_HOURS, R.HOSPITAL_LIGHT_HEALTH
+        else:                                              # забираются все деньги, остаток - в долг
+            cost, hours, health = p.money, R.HOSPITAL_LIGHT_HOURS, R.HOSPITAL_LIGHT_HEALTH
+            debt = R.HOSPITAL_LIGHT_COST - p.money
+        p.money -= cost
+        if debt:
+            self._add_debt(debt)
+        p.act = {"kind": "hospital", "quanta": hours * 60 // R.QUANTUM_MINUTES, "done_q": 0,
+                 "discharge_health": health, "rates": {}}
+        self.emit("hospital", cost=cost, debt=debt, health=health, hours=hours)
+
+    # ----- полночь -----
+
+    def _daily(self):
+        """Обработка конца игровых суток: долг, платежи, пособие. Вызывается строго по хронологии."""
+        p = self.p
+        # 1. Долг: проценты и «звонки»
+        if p.debt > 0:
+            if not p.debt_paid_today:
+                room = max(0, int(R.DEBT_CAP_MULT * p.debt_principal) - p.debt)
+                p.debt += min(math.ceil(p.debt * R.DEBT_RATE), room)
+                p.debt_pressure = min(R.DEBT_PRESSURE_MAX, p.debt_pressure + 1)
+            p.reputation -= R.DEBT_PRESSURE_REP * p.debt_pressure
+        else:
+            p.debt_pressure = 0
+        p.debt_paid_today = False
+        # 2. Жильё и питание
+        cost = daily_cost(p)
+        paid = min(p.money, cost)
+        short = cost - paid
+        p.money -= paid
+        if short:
+            self._add_debt(short)
+            p.happiness = clamp(p.happiness - R.UNPAID_HAPPINESS_LOSS)
+            p.health = clamp(p.health - R.UNPAID_HEALTH_LOSS)
+        self.emit("daily", cost=cost, paid=paid, short=short)
+        # 3. Пособие: страховка от «спирали смерти»
+        if p.health < R.HEALTH_CAREER_BLOCK and p.money < R.BENEFIT_BELOW_MONEY:
+            p.money += R.BENEFIT_AMOUNT
+            self.emit("benefit", amount=R.BENEFIT_AMOUNT)
+        p.reputation = clamp(p.reputation)
+
+# ---------- Публичные функции ----------
+
+def catch_up(p: Player, now: datetime, tz: tzinfo) -> list:
+    """Догоняет состояние до now. Возвращает список Event."""
+    sim = Sim(p, tz)
+    sim.run(floor_q(now))
+    return sim.events
+
+def can_sleep(p: Player) -> tuple:
+    if p.frozen_at is not None:
+        return False, "Игра заморожена."
+    if p.act is not None:
+        return False, "Сейчас вы заняты."
+    if p.energy >= R.SLEEP_AVAILABLE_BELOW:
+        return False, f"Спать можно, когда энергия ниже {R.SLEEP_AVAILABLE_BELOW:.0f}%."
+    return True, ""
+
+def start_sleep(p: Player, quanta: Optional[int] = None) -> tuple:
+    """quanta=None - до полного восстановления. При энергии ниже порога сон принудительный."""
+    ok, why = can_sleep(p)
+    if not ok:
+        return False, why
+    forced = p.energy < R.ENERGY_FORCED
+    p.act = {"kind": "sleep", "forced": forced, "quanta": None if forced else quanta, "done_q": 0}
+    return True, "Вы легли спать." if not forced else "Вы слишком устали: сон принудительный."
+
+def wake(p: Player, tz: tzinfo) -> tuple:
+    """Проснуться раньше срока (возвращает ok, текст, события)."""
+    act = p.act
+    if not act or act["kind"] != "sleep":
+        return False, "Вы не спите.", []
+    if act.get("forced"):
+        return False, "Вы слишком устали: проснуться получится, когда энергия восстановится.", []
+    sim = Sim(p, tz)
+    sim._finish()
+    return True, "Вы проснулись.", sim.events
+
+def abort_shift(p: Player, tz: tzinfo) -> tuple:
+    """Добровольный уход со смены или учёбы (срыв). Возвращает ok, текст, события."""
+    if not p.act or not p.act.get("career"):
+        return False, "Сейчас нет смены.", []
+    sim = Sim(p, tz)
+    sim._interrupt("voluntary", "voluntary")
+    return True, "Вы ушли со смены раньше срока.", sim.events
+
+def pay_debt(p: Player, amount: int) -> int:
+    """Погашает долг на amount (не больше денег и долга). Возвращает фактически выплаченное."""
+    amount = min(int(amount), p.money, p.debt)
+    if amount <= 0:
+        return 0
+    before = p.debt
+    p.money -= amount
+    p.debt -= amount
+    p.debt_principal = max(0, p.debt_principal - amount)
+    if p.debt == 0:
+        p.debt_pressure = 0
+        p.debt_principal = 0
+    elif amount >= before * R.DEBT_PAY_MIN_SHARE:
+        p.debt_paid_today = True
+        p.debt_pressure = max(0, p.debt_pressure - R.DEBT_PAY_PRESSURE_DROP)
+    return amount
+
+# ---------- Заморозка ----------
+
+def _fmt(dt: datetime, tz: tzinfo) -> str:
+    return dt.astimezone(tz).strftime("%d.%m %H:%M")
+
+def can_freeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    if p.frozen_at is not None:
+        return False, "Игра уже заморожена."
+    if p.act and (p.act.get("career") or p.act["kind"] == "hospital"):
+        return False, "Заморозка недоступна во время смены, учёбы и лечения: сначала закончите дело."
+    if p.last_unfreeze:
+        until = p.last_unfreeze + timedelta(days=R.FREEZE_COOLDOWN_DAYS)
+        if now < until:
+            return False, f"Повторная заморозка будет доступна {_fmt(until, tz)}."
+    return True, ""
+
+def freeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    """Вызывать после catch_up: состояние должно быть рассчитано до now."""
+    ok, why = can_freeze(p, now, tz)
+    if not ok:
+        return False, why
+    p.frozen_at = now
+    return True, "Игра заморожена: время для вашего рабочего остановилось."
+
+def unfreeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    """Без последствий: время расчёта переносится на «сейчас», пропущенные полночи не обрабатываются."""
+    if p.frozen_at is None:
+        return False, "Игра не заморожена."
+    until = p.frozen_at + timedelta(hours=R.FREEZE_MIN_HOURS)
+    if now < until:
+        return False, f"Разморозка будет доступна {_fmt(until, tz)}."
+    p.updated = floor_q(now)
+    p.frozen_at = None
+    p.last_unfreeze = now
+    return True, "С возвращением! Время рабочего снова идёт."
