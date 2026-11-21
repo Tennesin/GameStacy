@@ -91,9 +91,14 @@ class Player:
     last_unfreeze: Optional[datetime] = None
     week_start: Optional[str] = None        # понедельник текущей налоговой недели (ISO)
     week_income: int = 0                    # доход (брутто) за эту неделю
-    education: list = field(default_factory=list)
+    education: list = field(default_factory=list)   # коды из rules.EDUCATION (этап 5)
     exp: dict = field(default_factory=dict)         # профессия -> отработанные часы (опыт)
-    view_vac: Optional[int] = None          # вакансия, открытая в панели
+    view_vac: Optional[int] = None          # вакансия, открытая в панели (для кнопки «Взять»)
+    venue: Optional[str] = None             # магазин, в котором игрок сейчас находится
+    buffs: dict = field(default_factory=dict)       # вид -> {"code", "power", "left" (кванты)}
+    last_move: Optional[datetime] = None    # последний переезд
+    day_buys: dict = field(default_factory=dict)    # товар -> покупок за игровые сутки
+    day_ent: dict = field(default_factory=dict)     # занятие -> квантов за игровые сутки
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -107,6 +112,8 @@ class Player:
             "frozen_at": iso(self.frozen_at), "last_unfreeze": iso(self.last_unfreeze),
             "week_start": self.week_start, "week_income": self.week_income,
             "education": list(self.education), "exp": dict(self.exp), "view_vac": self.view_vac,
+            "venue": self.venue, "buffs": copy.deepcopy(self.buffs), "last_move": iso(self.last_move),
+            "day_buys": dict(self.day_buys), "day_ent": dict(self.day_ent),
         }
 
     @classmethod
@@ -129,6 +136,11 @@ class Player:
         p.education = list(d.get("education") or [])
         p.exp = {str(k): float(v) for k, v in (d.get("exp") or {}).items()}
         p.view_vac = d.get("view_vac")
+        p.venue = d.get("venue")
+        p.buffs = {str(k): dict(v) for k, v in (d.get("buffs") or {}).items()}
+        p.last_move = dt(d.get("last_move"))
+        p.day_buys = {str(k): int(v) for k, v in (d.get("day_buys") or {}).items()}
+        p.day_ent = {str(k): int(v) for k, v in (d.get("day_ent") or {}).items()}
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -187,6 +199,8 @@ class Sim:
             rates = {"energy": R.FREE_ENERGY_RATE, "health": R.FREE_HEALTH_RATE}
         res_neg = act.get("res_neg", 0.0) if act else 0.0
         res_energy = act.get("res_energy", 0.0) if act else 0.0
+        res_energy = min(R.RES_ENERGY_CAP, res_energy + buff_power(p, "stamina"))
+        rec = 1.0 + buff_power(p, "recovery")
         low = p.health < R.HEALTH_SLOW
         mult = happy_mult(p.happiness)
 
@@ -195,11 +209,15 @@ class Sim:
             e *= 1 - res_energy
             if low:
                 e *= R.LOW_HEALTH_DRAIN_MULT
-        elif e > 0 and low:
-            e *= R.LOW_HEALTH_REGEN_MULT
+        elif e > 0:
+            if low:
+                e *= R.LOW_HEALTH_REGEN_MULT
+            e *= rec
         hl = rates.get("health", 0.0)
         if hl < 0:
             hl *= 1 - res_neg
+        elif hl > 0:
+            hl *= rec
         if p.energy <= 0 and kind != "hospital":
             hl -= R.ZERO_ENERGY_HEALTH_LOSS
         hp = rates.get("happiness", 0.0)
@@ -217,6 +235,15 @@ class Sim:
                 act["quanta"] -= 1
             if act.get("wage"):
                 act["earned"] = act.get("earned", 0.0) + act["wage"] * QH * mult * (1 + act.get("bonus", 0.0))
+            if act.get("prof"):                            # опыт: «Концентрация» ускоряет его набор
+                act["xp"] = act.get("xp", 0.0) + 1.0 + buff_power(p, "learning")
+
+        for bk in list(p.buffs):                           # баффы тикают в квантах (заморозка их стопорит)
+            b = p.buffs[bk]
+            b["left"] -= 1
+            if b["left"] <= 0:
+                del p.buffs[bk]
+                self.emit("buff_end", kind=bk, code=b["code"])
 
         # Проверка порогов (порядок важен)
         if p.health < R.HEALTH_HOSPITAL and kind != "hospital":
@@ -226,6 +253,12 @@ class Sim:
             return
         if self._done(act):
             self._finish()
+            return
+        if act.get("guard") and p.energy < R.ENERGY_FORCED:    # досуг и курсы: мягкое прерывание без штрафов
+            self.emit("interrupted", activity=act["kind"], why="energy", reason="soft")
+            p.queue = [a for a in p.queue if a.get("keep")]
+            p.act = None
+            self._next()
             return
         if act.get("career") and (p.energy < R.ENERGY_FORCED or p.health < R.HEALTH_CAREER_BLOCK):
             self._interrupt("forced", "energy" if p.energy < R.ENERGY_FORCED else "health")
@@ -246,6 +279,7 @@ class Sim:
         p = self.p
         p.act = p.queue.pop(0) if p.queue else None
         if p.act is None and p.energy < R.ENERGY_FORCED:
+            p.venue = None
             p.act = {"kind": "sleep", "forced": True, "quanta": None, "done_q": 0}
             self.emit("forced_sleep")
 
@@ -257,6 +291,12 @@ class Sim:
             p.health = act["discharge_health"]
             p.energy = 100.0
             data["health"] = p.health
+        if act.get("arrive"):                              # дошли до магазина
+            p.venue = act["arrive"]
+            data["venue"] = p.venue
+        if act.get("course"):                              # курс закончен: включаем бафф
+            apply_buff(p, act["course"])
+            data["course"] = act["course"]
         self.emit("finished", **data)
         p.act = None
         self._next()
@@ -314,12 +354,12 @@ class Sim:
         self._add_exp(act, reason)
 
     def _add_exp(self, act: dict, reason: Optional[str]):
-        """Опыт по профессии: час работы - час опыта (при срыве вдвое меньше)."""
+        """Опыт по профессии: час работы - час опыта."""
         prof = act.get("prof")
         if not prof:
             return
         p = self.p
-        hours = act.get("done_q", 0) * R.QUANTUM_MINUTES / 60
+        hours = act.get("xp", act.get("done_q", 0)) * R.QUANTUM_MINUTES / 60
         if reason is not None:
             hours *= R.EXP_ABORT_MULT
         before = exp_level(p.exp.get(prof, 0.0))
@@ -335,6 +375,7 @@ class Sim:
         if p.act:
             self._settle(p.act, "forced")
         p.queue = []
+        p.venue = None
         debt = 0
         if p.money >= R.HOSPITAL_FULL_COST:
             cost, hours, health = R.HOSPITAL_FULL_COST, R.HOSPITAL_FULL_HOURS, R.HOSPITAL_FULL_HEALTH
@@ -365,6 +406,7 @@ class Sim:
         else:
             p.debt_pressure = 0
         p.debt_paid_today = False
+        p.day_buys, p.day_ent = {}, {}
         # 2. Жильё и питание
         cost = daily_cost(p)
         paid = min(p.money, cost)
@@ -524,6 +566,198 @@ def start_job(p: Player, vac) -> str:
     p.act, p.queue, p.view_vac = go, [work, home], None
     return f"Вы взяли подработку «{pr['title']}». Вы выехали на работу."
 
+# ---------- Общее для досуга ----------
+
+def free_reason(p: Player) -> str:
+    """Почему игрок не может начать новое дело. Пусто - может."""
+    if p.frozen_at is not None:
+        return "Игра заморожена."
+    if p.act is not None or p.queue:
+        return "Сейчас вы заняты."
+    return ""
+
+# ---------- Баффы (курсы больницы) ----------
+
+def buff_power(p: Player, kind: str) -> float:
+    b = p.buffs.get(kind)
+    return float(b["power"]) if b else 0.0
+
+def apply_buff(p: Player, code: str):
+    """Включает бафф курса: сильнее заменяет, равный продлевает, слабее игнорируется."""
+    c = R.COURSES[code]
+    kind = c["kind"]
+    q = c["hours"] * 60 // R.QUANTUM_MINUTES
+    cap = R.BUFF_MAX_HOURS * 60 // R.QUANTUM_MINUTES
+    cur = p.buffs.get(kind)
+    if cur is None or c["power"] > cur["power"]:
+        p.buffs[kind] = {"code": code, "power": c["power"], "left": q}
+    elif c["power"] == cur["power"]:
+        cur["left"] = min(cur["left"] + q, cap)
+
+def start_course(p: Player, code: str) -> tuple:
+    c = R.COURSES.get(code)
+    if c is None:
+        return False, "Такого курса нет."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
+    if p.energy < R.COURSE_MIN_ENERGY:
+        return False, f"Слишком мало сил: на курс можно прийти при энергии не ниже {R.COURSE_MIN_ENERGY:.0f}%."
+    if p.money < c["cost"]:
+        return False, f"Не хватает денег ({c['cost']} м.)."
+    cur = p.buffs.get(c["kind"])
+    if cur and cur["power"] > c["power"]:
+        return False, "У вас уже действует более сильный эффект этого вида."
+    p.money -= c["cost"]
+    p.act = {"kind": "course", "title": f"Курс «{c['title']}»", "guard": True, "course": code,
+             "quanta": c["lesson"] * 60 // R.QUANTUM_MINUTES, "done_q": 0,
+             "rates": {"energy": R.COURSE_ENERGY_RATE}}
+    return True, f"Вы записались на курс «{c['title']}»: эффект включится после занятия."
+
+# ---------- Жильё ----------
+
+def move_cost(code: str) -> int:
+    return R.HOUSING_MOVE_DAYS * R.HOUSING[code]["rent"]
+
+def can_move(p: Player, code: str, now: datetime, tz: tzinfo) -> tuple:
+    if code not in R.HOUSING:
+        return False, "Такого жилья нет."
+    if code == p.housing:
+        return False, "Вы уже здесь живёте."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
+    if p.last_move:
+        until = p.last_move + timedelta(hours=R.HOUSING_MOVE_COOLDOWN_HOURS)
+        if now < until:
+            return False, f"Переезжать так часто нельзя: следующий переезд {_fmt(until, tz)}."
+    fee = move_cost(code)
+    if p.money < fee:
+        return False, f"Не хватает денег на переезд ({fee} м.)."
+    return True, ""
+
+def move_housing(p: Player, code: str, now: datetime, tz: tzinfo) -> tuple:
+    ok, why = can_move(p, code, now, tz)
+    if not ok:
+        return False, why
+    p.money -= move_cost(code)
+    p.housing = code
+    p.last_move = now
+    return True, f"Вы переехали: {R.HOUSING[code]['title']}."
+
+# ---------- Рынок ----------
+
+def goods_of(venue: str) -> list:
+    cats = R.VENUES[venue]["cats"]
+    return [(code, item) for code, item in R.GOODS.items() if item["cat"] in cats]
+
+def good_price(venue: str, code: str) -> int:
+    base = R.GOODS[code]["price"]
+    markup = R.VENUES[venue]["markup"]
+    price = int(round(base * markup))
+    return max(price, base + 1) if markup > 1 else price
+
+def good_limit(code: str) -> int:
+    return R.GOODS[code].get("limit", R.DEFAULT_DAILY_LIMIT)
+
+def start_errand(p: Player, venue: str) -> tuple:
+    """Дорога в магазин. По прибытии (см. Sim._finish) игрок оказывается «в магазине»."""
+    v = R.VENUES.get(venue)
+    if v is None:
+        return False, "Такого магазина нет."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Вы уже в магазине."
+    p.act = {"kind": "errand", "title": f"Дорога: {v['title']}", "quanta": R.ERRAND_QUANTA, "done_q": 0,
+             "rates": {"energy": R.ERRAND_ENERGY_RATE}, "arrive": venue}
+    return True, f"Вы отправились: «{v['title']}»."
+
+def leave_venue(p: Player) -> tuple:
+    if not p.venue:
+        return False, "Вы не в магазине."
+    p.venue = None
+    p.act = {"kind": "errand", "title": "Дорога домой", "quanta": R.ERRAND_QUANTA, "done_q": 0,
+             "rates": {"energy": R.ERRAND_ENERGY_RATE}}
+    return True, "Вы вышли из магазина и идёте домой."
+
+def buy(p: Player, code: str) -> tuple:
+    venue = p.venue
+    if not venue:
+        return False, "Вы не в магазине."
+    item = R.GOODS.get(code)
+    if item is None or item["cat"] not in R.VENUES[venue]["cats"]:
+        return False, "Здесь такого нет."
+    price = good_price(venue, code)
+    if p.money < price:
+        return False, f"Не хватает денег ({price} м.)."
+    if p.day_buys.get(code, 0) >= good_limit(code):
+        return False, f"На сегодня лимит по этому товару исчерпан ({good_limit(code)} шт.)."
+    gain = {"energy": item.get("energy", 0), "health": item.get("health", 0), "happiness": item.get("happy", 0)}
+    cur = {"energy": p.energy, "health": p.health, "happiness": p.happiness}
+    if not any(gain[k] > 0 and cur[k] < 100 for k in gain):
+        return False, "Вам это сейчас ни к чему: показатели уже на максимуме."
+    if gain["health"] < 0 and p.health + gain["health"] < R.HEALTH_CAREER_BLOCK:
+        return False, "Здоровье и так слишком низкое: это вам сейчас вредно."
+    p.money -= price
+    p.energy = clamp(p.energy + gain["energy"])
+    p.health = clamp(p.health + gain["health"])
+    p.happiness = clamp(p.happiness + gain["happiness"])
+    p.day_buys[code] = p.day_buys.get(code, 0) + 1
+    return True, f"Куплено: {item['title']} за {price} м."
+
+# ---------- Развлечения ----------
+
+def dim_mult(used_q: int, q: int) -> float:
+    """Средний множитель отдачи для q квантов занятия, если за сутки уже пройдено used_q квантов."""
+    total = 0.0
+    for i in range(used_q, used_q + q):
+        h = i * R.QUANTUM_MINUTES / 60
+        for limit, k in R.DIM_TIERS:
+            if limit is None or h < limit:
+                total += k
+                break
+    return total / q
+
+def start_leisure(p: Player, code: str, hours: int) -> tuple:
+    ent = R.ENTERTAINMENT.get(code)
+    if ent is None or hours not in ent["hours"]:
+        return False, "Такого занятия нет."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
+    if p.energy < R.LEISURE_MIN_ENERGY:
+        return False, f"Слишком мало сил: нужно не меньше {R.LEISURE_MIN_ENERGY:.0f}% энергии."
+    cost = ent["cost"] * hours
+    if p.money < cost:
+        return False, f"Не хватает денег ({cost} м.)."
+    q = hours * 60 // R.QUANTUM_MINUTES
+    used = p.day_ent.get(code, 0)
+    mult = dim_mult(used, q)
+    rates = {"energy": ent["energy"], "health": ent["health"], "happiness": ent["happy"]}
+    for k, v in rates.items():
+        if v > 0:
+            rates[k] = round(v * mult, 3)
+    p.money -= cost
+    p.day_ent[code] = used + q
+    p.act = {"kind": "leisure", "title": ent["title"], "guard": True, "quanta": q, "done_q": 0, "rates": rates}
+    return True, f"{ent['title']}: {hours} ч."
+
+def stop_leisure(p: Player, tz: tzinfo) -> tuple:
+    """Закончить досуг раньше срока (деньги не возвращаются). Возвращает ok, текст, события."""
+    if not p.act or p.act["kind"] != "leisure":
+        return False, "Сейчас нечего заканчивать.", []
+    sim = Sim(p, tz)
+    sim._finish()
+    return True, "Вы закончили досуг раньше срока.", sim.events
+
 # ---------- Заморозка ----------
 
 def _fmt(dt: datetime, tz: tzinfo) -> str:
@@ -532,6 +766,8 @@ def _fmt(dt: datetime, tz: tzinfo) -> str:
 def can_freeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
     if p.frozen_at is not None:
         return False, "Игра уже заморожена."
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
     if p.act and (p.act.get("career") or p.act["kind"] == "hospital"):
         return False, "Заморозка недоступна во время смены, учёбы и лечения: сначала закончите дело."
     if p.last_unfreeze:

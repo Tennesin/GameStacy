@@ -310,6 +310,135 @@ def test_job_flow():
     assert paid.data["aborted"] and 4.0 < p.exp["miner"] < 5.5, p.exp
     print("разовая смена: OK")
 
+# ---------- Этап 2 ----------
+
+def test_housing():
+    p = L.new_player(1, T0)
+    p.money = 5000
+    assert L.move_housing(p, "loft", T0, TZ)[0]
+    assert p.housing == "loft" and p.money == 5000 - 2 * 520
+    assert not L.move_housing(p, "flat", at(1), TZ)[0]             # откат переезда
+    L.catch_up(p, at(10), TZ)
+    assert 62 < p.happiness < 68, p.happiness                      # счастье тянется к планке лофта (68)
+    assert L.move_housing(p, "flat", at(25), TZ)[0]                # через сутки можно
+    q = L.new_player(2, T0)
+    q.money = 10
+    assert not L.move_housing(q, "penthouse", T0, TZ)[0]           # не хватает денег
+    assert not L.move_housing(q, "room", T0, TZ)[0]                # уже живёт здесь
+    print("жильё и планка счастья: OK")
+
+def test_shop():
+    p = L.new_player(1, T0)
+    p.energy, p.health, p.money = 40.0, 50.0, 1000
+    assert L.start_errand(p, "food")[0]
+    assert not L.start_errand(p, "pharm")[0]                       # уже в пути
+    L.catch_up(p, at(0.2), TZ)
+    assert p.venue == "food" and p.act is None
+    assert not L.buy(p, "medicine")[0]                             # в «Продуктах» лекарств нет
+    e0 = p.energy
+    assert L.buy(p, "lunch")[0] and p.money == 960 and p.energy > e0 + 7
+    assert L.buy(p, "energy_drink")[0] and L.buy(p, "energy_drink")[0]
+    assert not L.buy(p, "energy_drink")[0]                         # лимит 2 в сутки
+    assert p.day_buys == {"lunch": 1, "energy_drink": 2}
+    assert L.good_price("food", "lunch") == 40 and L.good_price("super", "lunch") == 44
+    assert L.good_price("super", "medicine") > L.good_price("pharm", "medicine")
+    assert L.leave_venue(p)[0] and p.venue is None and p.act["kind"] == "errand"
+    L.catch_up(p, at(0.4), TZ)
+    assert p.act is None
+    L.catch_up(p, at(16), TZ)                                      # прошла полночь
+    assert p.day_buys == {}
+    q = L.new_player(2, T0)
+    q.venue = "food"
+    assert not L.buy(q, "snack")[0]                                # показатели на максимуме
+    r = L.new_player(3, T0)
+    r.venue, r.health = "pharm", 20.0
+    assert L.buy(r, "medicine")[0] and r.health == 30.0
+    assert not L.buy(r, "lunch")[0]                                # в аптеке еды нет
+    print("рынок и магазины: OK")
+
+def test_buffs():
+    p = L.new_player(1, T0)
+    p.money = 2000
+    assert L.start_course(p, "stamina_2")[0] and p.money == 2000 - 900
+    L.catch_up(p, at(3), TZ)
+    b = p.buffs["stamina"]
+    assert b["power"] == 0.15 and 0 < b["left"] < 288, b
+    p.buffs["stamina"]["power"] = 0.25
+    assert not L.start_course(p, "stamina_1")[0]                   # слабее действующего нельзя
+    p.buffs["stamina"]["power"] = 0.15
+    p.money = 5000
+    assert L.start_course(p, "stamina_3")[0]
+    L.catch_up(p, at(7), TZ)
+    assert p.buffs["stamina"]["code"] == "stamina_3" and p.buffs["stamina"]["left"] < 576
+
+    a, b = with_shift(L.new_player(2, T0)), with_shift(L.new_player(3, T0))
+    b.buffs = {"stamina": {"code": "stamina_3", "power": 0.25, "left": 10 ** 6}}
+    L.catch_up(a, at(3), TZ)
+    L.catch_up(b, at(3), TZ)
+    assert b.energy > a.energy + 5, (a.energy, b.energy)           # выносливость экономит энергию
+
+    a, b = L.new_player(4, T0), L.new_player(5, T0)
+    for x in (a, b):
+        x.energy = 20.0
+        L.start_sleep(x)
+    b.buffs = {"recovery": {"code": "recovery_3", "power": 0.5, "left": 10 ** 6}}
+    L.catch_up(a, at(1), TZ)
+    L.catch_up(b, at(1), TZ)
+    assert b.energy > a.energy + 4, (a.energy, b.energy)           # восстановление ускоряет сон
+
+    c = L.new_player(6, T0)
+    c.buffs = {"recovery": {"code": "recovery_1", "power": 0.15, "left": 3}}
+    ev = L.catch_up(c, at(1), TZ)
+    assert "buff_end" in kinds(ev) and c.buffs == {}               # срок баффа истекает
+
+    d = L.new_player(7, T0)
+    d.buffs = {"learning": {"code": "learning_3", "power": 0.35, "left": 10 ** 6}}
+    L.start_job(d, make_vac("loader", 4))
+    L.catch_up(d, at(6), TZ)
+    assert abs(d.exp["loader"] - 5.4) < 1e-6, d.exp               # 4 часа × 1.35
+    print("курсы и баффы: OK")
+
+def test_leisure():
+    assert L.dim_mult(0, 24) == 1.0
+    assert abs(L.dim_mult(24, 12) - 0.5) < 1e-9 and abs(L.dim_mult(36, 12) - 0.2) < 1e-9
+    assert abs(L.dim_mult(0, 36) - 30 / 36) < 1e-9
+    p = L.new_player(1, T0)
+    p.energy, p.money = 80.0, 500
+    assert L.start_leisure(p, "cinema", 2)[0] and p.money == 430
+    L.catch_up(p, at(3), TZ)
+    assert p.act is None and p.happiness > 70, p.happiness
+    assert L.start_leisure(p, "cinema", 2)[0]                      # вторая за день: отдача ниже
+    assert abs(p.act["rates"]["happiness"] - 7.0 * L.dim_mult(24, 24)) < 1e-2
+    L.catch_up(p, at(16), TZ)                                      # полночь сбрасывает счётчик
+    assert p.day_ent == {}
+
+    q = L.new_player(2, T0)
+    q.energy = 30.0
+    q.act = {"kind": "leisure", "guard": True, "quanta": 24, "done_q": 0, "rates": {"energy": -20.0}}
+    ks = kinds(L.catch_up(q, at(2), TZ))
+    assert "interrupted" in ks and "forced_sleep" in ks            # мягкое прерывание без штрафов
+    assert q.reputation == R.START_REPUTATION
+
+    r = L.new_player(3, T0)
+    r.energy = 20.0
+    assert not L.start_leisure(r, "park", 1)[0]                    # мало сил
+
+    s = L.new_player(4, T0)
+    assert L.start_leisure(s, "park", 3)[0]
+    L.catch_up(s, at(1), TZ)
+    ok, _, _ev = L.stop_leisure(s, TZ)
+    assert ok and s.act is None
+    print("развлечения: OK")
+
+def test_snapshot_stage2():
+    p = L.new_player(9, T0)
+    p.venue, p.last_move = "food", T0
+    p.buffs = {"stamina": {"code": "stamina_1", "power": 0.08, "left": 30}}
+    p.day_buys, p.day_ent = {"lunch": 2}, {"park": 12}
+    snap = json.loads(json.dumps(p.snapshot()))
+    assert L.Player.restore(snap).snapshot() == p.snapshot()
+    print("снимок этапа 2: OK")
+
 def main():
     test_tax()
     test_sleep()
@@ -326,6 +455,11 @@ def main():
     test_market_and_race()
     test_can_take()
     test_job_flow()
+    test_housing()
+    test_shop()
+    test_buffs()
+    test_leisure()
+    test_snapshot_stage2()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

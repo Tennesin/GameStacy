@@ -1,5 +1,4 @@
-"""Тексты панели и событий симулятора рабочего. Про Discord-объекты ничего не знает
-(кроме разметки времени <t:...>)."""
+"""Тексты панели и событий симулятора рабочего."""
 from datetime import datetime, timedelta
 
 from . import logic as L
@@ -8,6 +7,7 @@ from . import rules as R
 
 PERK_TEXT = {1: "+2,5% к зарплате", 2: "+1,5% к сопротивлению негативным эффектам",
              0: "+2% к сопротивлению расходу энергии"}
+SHOW_EVENTS_ON = ("status", "menu", "career", "jobs", "leisure", "market", "venue", "ent", "hospital", "housing")
 
 def bar(value: float) -> str:
     n = int(round(max(0.0, min(100.0, value)) / 10))
@@ -28,6 +28,20 @@ def dur(minutes: int) -> str:
 def title_of(prof) -> str:
     return R.PROFESSIONS.get(prof, {}).get("title", "работа")
 
+def buff_desc(kind: str, power: float) -> str:
+    pct = f"{power * 100:.0f}%"
+    return {"stamina": f"−{pct} к расходу энергии",
+            "learning": f"+{pct} к скорости опыта и обучения",
+            "recovery": f"+{pct} к восстановлению энергии и здоровья"}[kind]
+
+def effect_text(item: dict) -> str:
+    parts = []
+    for key, name in (("energy", "энергии"), ("health", "здоровья"), ("happy", "счастья")):
+        v = item.get(key)
+        if v:
+            parts.append(f"{v:+g} {name}")
+    return ", ".join(parts) or "—"
+
 def describe(ev) -> str:
     """Строка для списка «пока вас не было» или None, если событие показывать не нужно."""
     k, d = ev.kind, ev.data
@@ -46,6 +60,8 @@ def describe(ev) -> str:
     if k == "forced_sleep":
         return "🛌 Силы на исходе: вы идёте спать и не проснётесь, пока не восстановитесь"
     if k == "interrupted":
+        if d.get("reason") == "soft":
+            return "⚠️ Занятие прервано: энергия на исходе"
         why = "не хватило энергии" if d["why"] == "energy" else (
             "здоровье упало слишком низко" if d["why"] == "health" else "вы ушли сами")
         return f"⚠️ Смена прервана ({why}): оплата снижена"
@@ -59,6 +75,9 @@ def describe(ev) -> str:
                 f"{PERK_TEXT[d['level'] % 3]}")
     if k == "shift_void":
         return "⌛ Отработано меньше 15 минут: оплаты нет"
+    if k == "buff_end":
+        c = R.COURSES.get(d["code"])
+        return f"⏳ Эффект «{c['title'] if c else d['kind']}» закончился"
     if k == "finished":
         if d["activity"] == "sleep":
             return "⏰ Вы проснулись"
@@ -66,6 +85,16 @@ def describe(ev) -> str:
             return f"🏥 Выписка из больницы: здоровье {d['health']:.0f}%"
         if d["activity"] == "work":
             return "✅ Смена закончена"
+        if d["activity"] == "errand":
+            if d.get("venue"):
+                return f"🛒 Вы пришли: {R.VENUES[d['venue']]['title']}"
+            return "🏠 Вы вернулись домой"
+        if d["activity"] == "leisure":
+            return "🎭 Занятие закончилось"
+        if d["activity"] == "course":
+            c = R.COURSES[d["course"]]
+            return (f"🎓 Курс «{c['title']}» закончен: {buff_desc(c['kind'], c['power'])} "
+                    f"на {c['hours']} ч")
     return None
 
 def activity_text(p) -> str:
@@ -73,6 +102,8 @@ def activity_text(p) -> str:
     if p.frozen_at is not None:
         return "🧊 Игра заморожена"
     if act is None:
+        if p.venue:
+            return f"🛒 В магазине: {R.VENUES[p.venue]['title']}"
         return "🟢 Свободен"
     end = L.act_end(p)
     tail = f" (закончится {ts(end)})" if end else ""
@@ -83,6 +114,14 @@ def activity_text(p) -> str:
     if act["kind"] == "hospital":
         return "🏥 В больнице" + (f", выписка {ts(end)}" if end else "")
     return f"⚙️ {act.get('title', act['kind'])}{tail}"
+
+def buffs_text(p) -> str:
+    if not p.buffs:
+        return ""
+    parts = []
+    for kind, b in p.buffs.items():
+        parts.append(f"{buff_desc(kind, b['power'])} (ещё {dur(b['left'] * R.QUANTUM_MINUTES)})")
+    return "✨ **Эффекты:** " + "; ".join(parts)
 
 def status_text(p, now: datetime, tz) -> str:
     h = R.HOUSING[p.housing]
@@ -102,10 +141,14 @@ def status_text(p, now: datetime, tz) -> str:
         if p.debt_pressure:
             lines.append(f"📞 Вам названивают: давление {p.debt_pressure}/{R.DEBT_PRESSURE_MAX}. "
                          "Чем дольше долг не гасится, тем хуже репутация и настроение.")
-    lines.append(f"🏠 {h['title']} · 🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
+    lines.append(f"🏠 {h['title']} (счастье тянется к {h['base']:.0f}%) · "
+                 f"🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
     exps = [f"{title_of(k)} — ур. {L.exp_level(v)}" for k, v in p.exp.items() if L.exp_level(v) > 0]
     if exps:
         lines += ["", "🛠 **Опыт:** " + ", ".join(exps)]
+    bt = buffs_text(p)
+    if bt:
+        lines.append(bt)
     if p.frozen_at is None:
         lines.append(f"Следующее списание: {ts(L.next_midnight(p.updated, tz))}")
     else:
@@ -123,10 +166,93 @@ def status_text(p, now: datetime, tz) -> str:
         warns.append("⚠️ Здоровье падает: ниже 65% энергия будет уходить вдвое быстрее.")
     if p.energy < R.ENERGY_FORCED:
         warns.append("⚠️ Энергия на исходе: смены будут прерываться.")
-    elif p.energy < R.SLEEP_AVAILABLE_BELOW and p.act is None:
+    elif p.energy < R.SLEEP_AVAILABLE_BELOW and p.act is None and not p.venue:
         warns.append("😴 Энергия ниже 50%: можно лечь спать.")
+    if p.venue:
+        warns.append("🛒 Вы в магазине: пока вы здесь, спать и работать нельзя. Нажмите «В магазин» и затем «Уйти».")
     if warns:
         lines += [""] + warns
+    return "\n".join(lines)
+
+# ---------- Досуг ----------
+
+def leisure_text(p) -> str:
+    return ("🎭 **Досуг**\n"
+            f"💰 {money(p.money)} · ⚡ {p.energy:.0f}% · 😊 {p.happiness:.0f}%\n\n"
+            "🛒 **Рынок**: еда и лекарства (на каждую площадку нужно сходить)\n"
+            "🎭 **Развлечения**: поднимают счастье, чем дороже, тем лучше\n"
+            "🏥 **Больница**: добровольные курсы с временными эффектами\n"
+            "🏠 **Жильё**: чем дороже, тем выше «планка» счастья")
+
+def market_text(p) -> str:
+    lines = ["🛒 **Рынок**", "Выберите, куда пойти. Цены вы увидите на месте. "
+             f"Дорога туда и обратно занимает около {2 * R.ERRAND_QUANTA * R.QUANTUM_MINUTES} минут "
+             "и немного тратит энергию.", ""]
+    for code, v in R.VENUES.items():
+        names = [i["title"] for _c, i in L.goods_of(code)]
+        extra = f" (дороже на {round((v['markup'] - 1) * 100)}%)" if v["markup"] > 1 else ""
+        lines.append(f"{v['emoji']} **{v['title']}**{extra}: " + ", ".join(names))
+    return "\n".join(lines)
+
+def venue_text(p) -> str:
+    v = R.VENUES[p.venue]
+    lines = [f"{v['emoji']} **{v['title']}**", f"💰 У вас {money(p.money)}.", ""]
+    if v["markup"] > 1:
+        lines += [f"Здесь всё дороже на {round((v['markup'] - 1) * 100)}%, зато есть и еда, и лекарства.", ""]
+    for code, item in L.goods_of(p.venue):
+        left = L.good_limit(code) - p.day_buys.get(code, 0)
+        lines.append(f"• **{item['title']}** — {money(L.good_price(p.venue, code))} · "
+                     f"{effect_text(item)} · сегодня осталось: {max(0, left)}")
+    lines += ["", "Выберите товар в списке. Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
+    return "\n".join(lines)
+
+def ent_text(p) -> str:
+    lines = ["🎭 **Развлечения**", f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%",
+             f"Первые {R.DIM_TIERS[0][0]:.0f} ч одного занятия за сутки дают полный эффект, "
+             "дальше отдача падает.", ""]
+    for code, e in R.ENTERTAINMENT.items():
+        used_h = p.day_ent.get(code, 0) * R.QUANTUM_MINUTES / 60
+        cost = "бесплатно" if not e["cost"] else f"{e['cost']} м./ч"
+        eff = f"счастье {e['happy']:+g}/ч"
+        if e["health"]:
+            eff += f", здоровье {e['health']:+g}/ч"
+        if e["energy"]:
+            eff += f", энергия {e['energy']:+g}/ч"
+        used = f" · сегодня уже {used_h:g} ч" if used_h else ""
+        lines.append(f"• **{e['title']}** — {cost} · {eff}{used}")
+    lines += ["", f"Начать можно при энергии не ниже {R.LEISURE_MIN_ENERGY:.0f}%."]
+    return "\n".join(lines)
+
+def hospital_text(p) -> str:
+    lines = ["🏥 **Больница**",
+             "Принудительное лечение (при здоровье ниже 5%) проходит само. Здесь добровольные курсы: "
+             "они стоят денег, занимают время и дают временный эффект после занятия.", ""]
+    bt = buffs_text(p)
+    if bt:
+        lines += [bt, ""]
+    for kind, kname in R.BUFF_KINDS.items():
+        lines.append(f"**{kname}**")
+        for _code, c in R.COURSES.items():
+            if c["kind"] == kind:
+                lines.append(f"• {c['title']} — {money(c['cost'])}: {buff_desc(kind, c['power'])}, "
+                             f"{c['hours']} ч, занятие {c['lesson']} ч")
+    lines += ["", "Один эффект каждого вида: более сильный заменяет слабый, тот же курс продлевает срок."]
+    return "\n".join(lines)
+
+def housing_text(p, now: datetime, tz) -> str:
+    h = R.HOUSING[p.housing]
+    lines = ["🏠 **Жильё**",
+             f"Сейчас: {h['title']} — {money(h['rent'])}/сут., счастье тянется к {h['base']:.0f}%.", ""]
+    for code, x in R.HOUSING.items():
+        mark = "▶ " if code == p.housing else "• "
+        lines.append(f"{mark}**{x['title']}** — {money(x['rent'])}/сут. · планка счастья {x['base']:.0f}% · "
+                     f"сон ×{x['sleep']:.2f}, лечение сном ×{x['heal']:.2f}")
+    lines += ["", f"Переезд стоит {R.HOUSING_MOVE_DAYS} суток аренды нового жилья; "
+                  f"чаще раза в {R.HOUSING_MOVE_COOLDOWN_HOURS} ч переезжать нельзя."]
+    if p.last_move:
+        until = p.last_move + timedelta(hours=R.HOUSING_MOVE_COOLDOWN_HOURS)
+        if now < until:
+            lines.append(f"Следующий переезд {ts(until)}.")
     return "\n".join(lines)
 
 # ---------- Рынок вакансий ----------
@@ -199,7 +325,17 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
                 f"• репутация −{R.REP_ABORT_VOLUNTARY:.0f}.\n"
                 "Дорога домой останется. Если отработано меньше 15 минут, оплаты не будет.")
     elif screen == "leisure":
-        text = "🎭 **Досуг**\nРаздел в разработке: здесь будут магазин и развлечения."
+        text = leisure_text(p)
+    elif screen == "market":
+        text = market_text(p)
+    elif screen == "venue" and p.venue:
+        text = venue_text(p)
+    elif screen == "ent":
+        text = ent_text(p)
+    elif screen == "hospital":
+        text = hospital_text(p)
+    elif screen == "housing":
+        text = housing_text(p, now, tz)
     elif screen == "sleep":
         text = ("😴 **Сон**\nВыберите, сколько спать. Проснуться раньше можно, "
                 "кроме принудительного сна. Во сне быстрее всего восстанавливаются силы и здоровье.")
@@ -214,7 +350,7 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = status_text(p, now, tz)
     lines = [text]
     shown = [t for t in (describe(e) for e in events) if t][-R.EVENTS_SHOWN:]
-    if shown and screen in ("status", "menu", "career", "jobs"):
+    if shown and screen in SHOW_EVENTS_ON:
         lines += ["", "**Пока вас не было:**"] + shown
     if note:
         lines += ["", f"ℹ️ {note}"]

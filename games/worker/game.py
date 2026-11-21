@@ -1,4 +1,5 @@
-"""Контроллер симулятора рабочего: личная панель (скрытые сообщения), действия игрока, рынок вакансий."""
+"""Контроллер симулятора рабочего: личная панель (скрытые сообщения), действия игрока,
+рынок вакансий, магазины, досуг, больница, жильё."""
 import logging
 import math
 import random
@@ -53,7 +54,7 @@ class WorkerController:
             await interaction.response.edit_message(content=text, view=view)
 
     def _context(self, store, screen: str, p: L.Player, now) -> dict:
-        """Данные рынка для отрисовки экрана."""
+        """Данные рынка вакансий для отрисовки экрана."""
         ts = int(now.timestamp())
         if screen == "jobs":
             return {"jobs": store.list_vacancies(ts)}
@@ -71,10 +72,46 @@ class WorkerController:
                 return "status", msg
             return "status", ""
 
-        if action in ("menu", "career", "leisure"):
+        # В магазине можно только покупать и уходить
+        if p.venue and action not in ("status", "refresh", "buy", "venue_leave"):
+            note = "" if action in ("market", "menu", "leisure") else "Сначала выйдите из магазина."
+            return "venue", note
+
+        if action in ("menu", "career", "leisure", "market", "ent", "housing"):
             return action, ""
+        if action == "nav_hosp":
+            return "hospital", ""
         if action in ("status", "refresh"):
             return "status", ""
+
+        # ----- рынок (магазины) -----
+        if action in ("go_food", "go_pharm", "go_super"):
+            ok, msg = L.start_errand(p, action[3:])
+            return ("status" if ok else "market"), msg
+        if action == "buy":
+            ok, msg = L.buy(p, value or "")
+            return ("venue" if p.venue else "status"), msg
+        if action == "venue_leave":
+            ok, msg = L.leave_venue(p)
+            return "status", msg
+
+        # ----- досуг, больница, жильё -----
+        if action == "ent_go":
+            code, _, h = (value or "").partition(":")
+            if not h.isdigit():
+                return "ent", "Не удалось понять выбор."
+            ok, msg = L.start_leisure(p, code, int(h))
+            return ("status" if ok else "ent"), msg
+        if action == "stop_leisure":
+            ok, msg, evs = L.stop_leisure(p, TZ)
+            events.extend(evs)
+            return "status", msg
+        if action == "course_go":
+            ok, msg = L.start_course(p, value or "")
+            return ("status" if ok else "hospital"), msg
+        if action == "house_go":
+            ok, msg = L.move_housing(p, value or "", now, TZ)
+            return ("status" if ok else "housing"), msg
 
         # ----- рынок вакансий -----
         if action == "jobs":
