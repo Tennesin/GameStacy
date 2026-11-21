@@ -1,0 +1,257 @@
+"""Справка для игроков: команда /workinfo. Все числа берутся из rules.py, вручную не пишутся."""
+from contextlib import suppress
+
+import discord
+
+from core.errors import is_expired, report_error
+from . import rules as R
+from .texts import edu_unlocks, money
+
+PAGE_LIMIT = 1990                 # лимит Discord 2000 символов на сообщение
+
+def pct(x: float) -> str:
+    """0.025 -> «2,5»."""
+    return f"{x * 100:g}".replace(".", ",")
+
+# ---------- Разделы ----------
+
+def _intro() -> str:
+    home = R.HOUSING[R.START_HOUSING]
+    daily = home["rent"] + R.FOOD[R.START_FOOD]["cost"]
+    return (
+        "💼 **Симулятор рабочего: об игре**\n"
+        "Вы ведёте своего рабочего: подрабатываете, учитесь, лечитесь, тратите деньги и растёте в профессии. "
+        "Игра идёт в реальном времени (по Ташкенту), даже когда вы не в сети: смена, сон и учёба "
+        "продолжаются сами, а итоги вы увидите в блоке «Пока вас не было».\n\n"
+        "**Как играть**\n"
+        "• Команда /work открывает вашу личную панель. Кнопки в ней работают только у владельца панели.\n"
+        "• Причины отказов («не хватает денег», «вы заняты» и т. п.) приходят скрытым сообщением: "
+        "их видите только вы.\n"
+        "• Разделы: «Карьера» (работа, учёба), «Досуг» (магазины, развлечения, больница, жильё), "
+        "«Моё состояние».\n\n"
+        f"**Старт:** {money(R.START_MONEY)}, жильё «{home['title']}», энергия {R.START_ENERGY:.0f}%, "
+        f"здоровье {R.START_HEALTH:.0f}%, счастье {R.START_HAPPINESS:.0f}%.\n"
+        f"Каждую полночь по Ташкенту списываются аренда и питание: сейчас {money(daily)} в сутки. "
+        "Ваш заработок должен их покрывать."
+    )
+
+def _stats() -> str:
+    return (
+        "📊 **Показатели**\n"
+        f"⚡ **Энергия.** Когда вы свободны, она растёт на {R.FREE_ENERGY_RATE:g}% в час, во сне "
+        f"на {R.SLEEP_ENERGY_RATE:g}% в час (в хорошем жилье быстрее). Лечь спать можно при энергии "
+        f"ниже {R.SLEEP_AVAILABLE_BELOW:.0f}%. Ниже {R.ENERGY_FORCED:.0f}% смену прервут, и вы уснёте "
+        f"принудительно, пока энергия не дойдёт до {R.ENERGY_FORCED_WAKE:.0f}%. При нулевой энергии "
+        "ещё и падает здоровье.\n\n"
+        f"❤️ **Здоровье.** Ниже {R.HEALTH_SLOW:.0f}% энергия тратится вдвое быстрее, а восстанавливается "
+        f"вдвое медленнее. Ниже {R.HEALTH_CAREER_BLOCK:.0f}% карьера и учёба закрыты. "
+        f"Ниже {R.HEALTH_HOSPITAL:.0f}% вас увозят в больницу (платно).\n\n"
+        "😊 **Счастье.** Тянется к «планке» вашего жилья (чем дороже жильё, тем она выше). "
+        f"Влияет на зарплату: от ×{R.HAPPY_MULT_MIN:g} при 0% до ×{R.HAPPY_MULT_MAX:g} при 100%. "
+        "Падает от долгов и тяжёлой работы, растёт от развлечений.\n\n"
+        f"⭐ **Репутация** (старт {R.START_REPUTATION:.0f} из 100). За полную смену растёт на "
+        f"{R.REP_PER_HOUR:g} за час (не больше {R.REP_SHIFT_MAX:g} за смену), срывы и прогулы её снижают. "
+        "От репутации зависит доступ к вакансиям.\n\n"
+        "💰 **Деньги** измеряются в монетах («м.»)."
+    )
+
+def _tax_text() -> str:
+    parts, low = [], 0
+    for limit, rate in R.TAX_BRACKETS:
+        if limit is None:
+            parts.append(f"свыше {low} м. — {pct(rate)}%")
+        else:
+            parts.append(f"до {limit} м. — {pct(rate)}%")
+            low = limit
+    return ", ".join(parts)
+
+def _jobs() -> str:
+    return (
+        "🔨 **Подработки и рынок вакансий** (Карьера → Работа)\n"
+        "Список общий для всего сервера: кто успел, тот и взял. "
+        f"Он обновляется каждые {R.MARKET_WINDOW_HOURS} ч, вакансий в нём от {R.MARKET_MIN} до {R.MARKET_MAX}. "
+        "Значок 🔒 значит, что вам не хватает образования или репутации (причина в карточке вакансии).\n\n"
+        "**Разовая подработка**\n"
+        "• Начинается сразу: дорога, смена, дорога домой. Проезд туда и обратно оплачивается заранее.\n"
+        f"• Платит на {pct(R.ONCE_WAGE_MULT - 1)}% больше постоянной. Выйти на смену можно при энергии "
+        f"не ниже {R.MIN_START_ENERGY:.0f}%.\n"
+        "• В карточке вакансии есть прикидка: хватит ли сил доработать до конца.\n"
+        f"• Если энергия упадёт ниже {R.ENERGY_FORCED:.0f}% или здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%, "
+        f"смену прервут: оплата ×{R.ABORT_PAY_FORCED:g}, репутация −{R.REP_ABORT_FORCED:g}.\n"
+        f"• Уйти самому: оплата ×{R.ABORT_PAY_VOLUNTARY:g}, репутация −{R.REP_ABORT_VOLUNTARY:g}. "
+        f"Если отработано меньше {R.MIN_PAY_MINUTES} минут, оплаты нет.\n\n"
+        "**НДФЛ** считается за неделю (с понедельника) ступенчато, каждая ставка действует только "
+        f"на свою часть дохода: {_tax_text()}."
+    )
+
+def _perm() -> str:
+    lines = ["📑 **Постоянная работа и опыт**"]
+    if R.PERMANENT_ENABLED:
+        lines.append(
+            "**Договор** (вакансия «постоянная») подписывается сразу, без дороги. Ставка, смена и выходные "
+            "фиксируются навсегда. На смену нужно выходить самому: Карьера → Моя работа → «Выйти на смену». "
+            "Постоянная работа может быть только одна.\n"
+            f"• **Прогул** — рабочий день без смены (считается в полночь по Ташкенту): репутация "
+            f"−{R.JOB_ABSENCE_REP:g}, недельная премия сгорает. {R.JOB_FIRE_ABSENCES} прогула — увольнение. "
+            "Неделя без прогулов снимает один.\n"
+            f"• Не прогул: выходной, день найма, больница, здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%, "
+            "принудительный сон.\n"
+            f"• **Премия** {pct(R.JOB_WEEK_BONUS)}% от недельного заработка по договору выплачивается "
+            "в воскресенье в полночь, если не было прогулов и ухода со смены раньше срока.\n"
+            f"• После увольнения или ухода новую постоянную работу можно взять через "
+            f"{R.JOB_HIRE_COOLDOWN_HOURS} ч.")
+    else:
+        lines.append("Постоянная работа появится в одном из следующих обновлений.")
+    lines.append(
+        f"\n**Опыт.** Час работы даёт час опыта в профессии (до уровня {R.EXP_MAX_LEVEL}). Уровни по кругу "
+        f"дают: +{pct(R.EXP_WAGE_STEP)}% к зарплате, +{pct(R.EXP_NEG_STEP)}% к сопротивлению негативным "
+        f"эффектам, +{pct(R.EXP_ENERGY_STEP)}% к сопротивлению расходу энергии. "
+        f"При срыве смены опыт в {1 / R.EXP_ABORT_MULT:g} раза меньше.")
+    return "\n".join(lines)
+
+def _edu() -> str:
+    lines = [
+        "🎓 **Образование** (Карьера → Образование)",
+        "Учёба открывает новые вакансии. Занятие длится "
+        + " / ".join(f"{h}" for h in R.EDU_SESSION_HOURS) + " ч на выбор. Оплата списывается "
+        "по минутам, пока вы учитесь. Закончить можно в любой момент без штрафов, прогресс сохраняется. "
+        f"Занятие прервётся само, если кончатся деньги или силы. Начать можно при энергии не ниже "
+        f"{R.EDU_MIN_ENERGY:.0f}%.",
+        "",
+    ]
+    for code, e in R.EDUCATION.items():
+        need = ", ".join(R.EDUCATION[n]["title"] for n in e["need"])
+        unlocks = edu_unlocks(code)
+        line = f"• **{e['title']}** — {e['hours']} ч, {e['fee']} м./ч (≈ {money(e['hours'] * e['fee'])})"
+        if need:
+            line += f"; сначала: {need}"
+        if unlocks:
+            line += f"; нужно для: {unlocks}"
+        lines.append(line)
+    return "\n".join(lines)
+
+def _shops() -> str:
+    lines = [
+        "🛒 **Магазины и развлечения** (Досуг)",
+        f"**Рынок.** Дорога в магазин занимает около {R.ERRAND_QUANTA * R.QUANTUM_MINUTES} мин в одну "
+        "сторону и немного тратит энергию. Пока вы в магазине, спать, работать и учиться нельзя: "
+        "закончив покупки, нажмите «Уйти из магазина». На каждый товар есть лимит покупок в сутки. "
+        "Товары, которые вам сейчас не нужны (показатели на максимуме), купить нельзя.",
+    ]
+    for code, v in R.VENUES.items():
+        extra = f", дороже на {round((v['markup'] - 1) * 100)}%" if v["markup"] > 1 else ""
+        lines.append(f"• {v['emoji']} **{v['title']}**{extra}")
+    lines += [
+        "",
+        f"**Развлечения.** Начать можно при энергии не ниже {R.LEISURE_MIN_ENERGY:.0f}%. "
+        f"Первые {R.DIM_TIERS[0][0]:.0f} ч одного занятия за сутки дают полный эффект, дальше отдача падает. "
+        "Счётчик сбрасывается в полночь.",
+    ]
+    for code, e in R.ENTERTAINMENT.items():
+        cost = "бесплатно" if not e["cost"] else f"{e['cost']} м./ч"
+        lines.append(f"• **{e['title']}** — {cost}, счастье {e['happy']:+g}/ч")
+    return "\n".join(lines)
+
+def _home() -> str:
+    costs = [c["cost"] for c in R.COURSES.values()]
+    hours = [c["hours"] for c in R.COURSES.values()]
+    lines = ["🏠 **Жильё и больница** (Досуг)", "**Жильё** задаёт ежедневную аренду, «планку» счастья и скорость сна:"]
+    for h in R.HOUSING.values():
+        lines.append(f"• **{h['title']}** — {h['rent']} м./сут., планка счастья {h['base']:.0f}%")
+    lines += [
+        f"Переезд стоит {R.HOUSING_MOVE_DAYS} суток аренды нового жилья, чаще раза в "
+        f"{R.HOUSING_MOVE_COOLDOWN_HOURS} ч переезжать нельзя.",
+        "",
+        "**Больница, курсы.** Добровольные платные занятия с временным эффектом после занятия: "
+        + ", ".join(R.BUFF_KINDS.values()).lower() + f". Три уровня силы у каждого, цена от {min(costs)} "
+        f"до {max(costs)} м., эффект держится от {min(hours)} до {max(hours)} ч. "
+        "Эффект одного вида один: сильный заменяет слабый, тот же курс продлевает срок.",
+        "",
+        f"**Принудительное лечение** при здоровье ниже {R.HEALTH_HOSPITAL:.0f}%: полное за "
+        f"{money(R.HOSPITAL_FULL_COST)} ({R.HOSPITAL_FULL_HOURS} ч, здоровье до {R.HOSPITAL_FULL_HEALTH:.0f}%). "
+        f"Если денег меньше, облегчённое: {R.HOSPITAL_LIGHT_HOURS} ч, здоровье до "
+        f"{R.HOSPITAL_LIGHT_HEALTH:.0f}%, а нехватка до {money(R.HOSPITAL_LIGHT_COST)} записывается в долг.",
+    ]
+    return "\n".join(lines)
+
+def _debts() -> str:
+    return (
+        "🧾 **Платежи, долги и заморозка**\n"
+        "**Каждую полночь** по Ташкенту списываются аренда и питание. Если денег не хватило, остаток "
+        f"становится долгом, счастье падает на {R.UNPAID_HAPPINESS_LOSS:g}, здоровье на "
+        f"{R.UNPAID_HEALTH_LOSS:g}.\n\n"
+        f"**Долг** растёт на {pct(R.DEBT_RATE)}% в сутки (но не более чем до {R.DEBT_CAP_MULT:g}× основной "
+        f"суммы). Пока он не гасится, копится «давление» (звонки, до {R.DEBT_PRESSURE_MAX}): падают "
+        f"репутация и счастье. Платёж от {pct(R.DEBT_PAY_MIN_SHARE)}% долга за сутки останавливает рост "
+        "и снимает часть давления. Погасить можно кнопками в «Моё состояние».\n\n"
+        f"**Пособие.** Если здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}% и денег меньше "
+        f"{R.BENEFIT_BELOW_MONEY}, в полночь выдаётся {money(R.BENEFIT_AMOUNT)}.\n\n"
+        "**Заморозка** (Моё состояние → «Заморозить игру»): время для вашего рабочего останавливается, "
+        "платежи, проценты и смены ждут. "
+        f"Разморозить можно не раньше чем через {R.FREEZE_MIN_HOURS} ч, повторная заморозка доступна "
+        f"через {R.FREEZE_COOLDOWN_DAYS} сут. Нельзя во время смены, учёбы, лечения и в магазине."
+    )
+
+def _tips() -> str:
+    return (
+        "💡 **Советы новичку**\n"
+        "• Не берите смену, если в карточке написано, что вы вряд ли доработаете: срыв бьёт по оплате "
+        "и репутации.\n"
+        f"• Держите запас денег хотя бы на сутки: платежи списываются в полночь, даже если вы спите.\n"
+        f"• Ложитесь спать заранее: при энергии ниже {R.ENERGY_FORCED:.0f}% сон станет принудительным.\n"
+        "• Здоровье восстанавливается медленно, берегите его. Дешёвые лекарства в аптеке выручают.\n"
+        "• Школа открывает новые профессии, а они платят заметно больше грузчика.\n"
+        "• Не уверены, почему кнопка не сработала? Причина придёт скрытым сообщением.\n"
+        "• Уходите надолго? Заморозьте игру, чтобы не копились платежи."
+    )
+
+def build_pages() -> list:
+    """[(ключ, название в списке, текст)] в порядке показа."""
+    return [
+        ("intro", "💼 Об игре", _intro()),
+        ("stats", "📊 Показатели", _stats()),
+        ("jobs", "🔨 Подработки и рынок вакансий", _jobs()),
+        ("perm", "📑 Постоянная работа и опыт", _perm()),
+        ("edu", "🎓 Образование", _edu()),
+        ("shops", "🛒 Магазины и развлечения", _shops()),
+        ("home", "🏠 Жильё и больница", _home()),
+        ("debts", "🧾 Платежи, долги и заморозка", _debts()),
+        ("tips", "💡 Советы новичку", _tips()),
+    ]
+
+# ---------- Показ ----------
+
+class InfoView(discord.ui.View):
+    """Скрытое окно справки со списком разделов. Не постоянное: живёт 5 минут."""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.origin = None                          # нажатие, открывшее окно (для правки по тайм-ауту)
+        self.pages = {key: text for key, _t, text in build_pages()}
+        options = [discord.SelectOption(label=title[:100], value=key, default=(i == 0))
+                   for i, (key, title, _x) in enumerate(build_pages())]
+        self.select = discord.ui.Select(placeholder="Выберите раздел справки", options=options)
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        key = self.select.values[0]
+        for opt in self.select.options:
+            opt.default = opt.value == key
+        await interaction.response.edit_message(content=self.pages[key][:PAGE_LIMIT], view=self)
+
+    async def on_timeout(self):
+        if self.origin is not None:
+            with suppress(discord.HTTPException):
+                await self.origin.edit_original_response(view=None)
+
+    async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
+        await report_error(interaction, error, ephemeral=True)
+
+async def open_info(interaction: discord.Interaction):
+    view = InfoView()
+    first = next(iter(view.pages.values()))
+    await interaction.response.send_message(first[:PAGE_LIMIT], view=view, ephemeral=True)
+    view.origin = interaction

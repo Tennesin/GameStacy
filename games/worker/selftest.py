@@ -568,6 +568,12 @@ def test_education():
     assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
     print("образование: OK")
 
+def test_info():
+    from .info import PAGE_LIMIT, build_pages
+    for key, _title, text in build_pages():
+        assert len(text) <= PAGE_LIMIT, (key, len(text))
+    print("справка /workinfo: OK")
+
 def main():
     test_tax()
     test_sleep()
@@ -591,6 +597,7 @@ def main():
     test_snapshot_stage2()
     test_permanent()
     test_education()
+    test_info()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from .console import console_work
 from .storage import StorageRegistry
 from .texts import money, render
 from .views import ConfirmView, PanelView, build_specs, persistent_views
+from .info import open_info
 
 log = logging.getLogger("stacy.worker")
 
@@ -303,4 +304,9 @@ def setup(bot):
     async def work(interaction: discord.Interaction):
         await ctrl.open_panel(interaction)
 
+    @app_commands.command(name="workinfo", description="Симулятор рабочего: подробные правила и подсказки")
+    async def workinfo(interaction: discord.Interaction):
+        await open_info(interaction)
+
     bot.tree.add_command(work)
+    bot.tree.add_command(workinfo)
