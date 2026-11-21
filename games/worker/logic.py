@@ -91,6 +91,9 @@ class Player:
     last_unfreeze: Optional[datetime] = None
     week_start: Optional[str] = None        # понедельник текущей налоговой недели (ISO)
     week_income: int = 0                    # доход (брутто) за эту неделю
+    education: list = field(default_factory=list)
+    exp: dict = field(default_factory=dict)         # профессия -> отработанные часы (опыт)
+    view_vac: Optional[int] = None          # вакансия, открытая в панели
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -103,6 +106,7 @@ class Player:
             "act": copy.deepcopy(self.act), "queue": copy.deepcopy(self.queue),
             "frozen_at": iso(self.frozen_at), "last_unfreeze": iso(self.last_unfreeze),
             "week_start": self.week_start, "week_income": self.week_income,
+            "education": list(self.education), "exp": dict(self.exp), "view_vac": self.view_vac,
         }
 
     @classmethod
@@ -122,6 +126,9 @@ class Player:
         p.frozen_at = dt(d.get("frozen_at"))
         p.last_unfreeze = dt(d.get("last_unfreeze"))
         p.week_start = d.get("week_start")
+        p.education = list(d.get("education") or [])
+        p.exp = {str(k): float(v) for k, v in (d.get("exp") or {}).items()}
+        p.view_vac = d.get("view_vac")
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -303,7 +310,23 @@ class Sim:
             rep = -(R.REP_ABORT_FORCED if reason == "forced" else R.REP_ABORT_VOLUNTARY)
         p.reputation = clamp(p.reputation + rep)
         self.emit("paid", activity=act["kind"], gross=gross, tax=tax, net=net,
-                  reputation=rep, aborted=reason is not None)
+                  reputation=rep, aborted=reason is not None, prof=act.get("prof"))
+        self._add_exp(act, reason)
+
+    def _add_exp(self, act: dict, reason: Optional[str]):
+        """Опыт по профессии: час работы - час опыта (при срыве вдвое меньше)."""
+        prof = act.get("prof")
+        if not prof:
+            return
+        p = self.p
+        hours = act.get("done_q", 0) * R.QUANTUM_MINUTES / 60
+        if reason is not None:
+            hours *= R.EXP_ABORT_MULT
+        before = exp_level(p.exp.get(prof, 0.0))
+        p.exp[prof] = p.exp.get(prof, 0.0) + hours
+        after = exp_level(p.exp[prof])
+        if after > before:
+            self.emit("level_up", prof=prof, level=after)
 
     # ----- больница -----
 
@@ -419,6 +442,87 @@ def pay_debt(p: Player, amount: int) -> int:
         p.debt_paid_today = True
         p.debt_pressure = max(0, p.debt_pressure - R.DEBT_PAY_PRESSURE_DROP)
     return amount
+
+# ---------- Опыт ----------
+
+def exp_level(hours: float) -> int:
+    """Уровень по накопленным часам: уровень N требует BASE + STEP * N часов."""
+    total, level = 0.0, 0
+    while level < R.EXP_MAX_LEVEL:
+        need = R.EXP_BASE_HOURS + R.EXP_STEP_HOURS * (level + 1)
+        if hours + 1e-9 < total + need:
+            break
+        total += need
+        level += 1
+    return level
+
+def perks(level: int) -> dict:
+    """Бонусы уровня: улучшения идут по кругу (зарплата, негатив, энергия)."""
+    return {"bonus": ((level + 2) // 3) * R.EXP_WAGE_STEP,
+            "res_neg": ((level + 1) // 3) * R.EXP_NEG_STEP,
+            "res_energy": (level // 3) * R.EXP_ENERGY_STEP}
+
+# ---------- Работа ----------
+
+def lock_reason(p: Player, vac) -> str:
+    """Постоянная причина недоступности вакансии (образование, репутация, формат). Пусто - доступна."""
+    pr = R.PROFESSIONS[vac.prof]
+    missing = [R.EDUCATION[e]["title"] for e in pr["edu"] if e not in p.education]
+    if missing:
+        return "нужно образование: " + ", ".join(missing)
+    if p.reputation < vac.min_rep:
+        return f"нужна репутация {vac.min_rep} (у вас {p.reputation:.0f})"
+    if vac.kind == "perm" and not R.PERMANENT_ENABLED:
+        return "постоянная работа появится в одном из следующих обновлений игры"
+    return ""
+
+def can_take(p: Player, vac, now_ts: int) -> tuple:
+    """Можно ли взять вакансию прямо сейчас."""
+    if vac is None or not vac.alive(now_ts):
+        return False, "Эту вакансию уже забрали или она исчезла."
+    if p.frozen_at is not None:
+        return False, "Игра заморожена."
+    why = lock_reason(p, vac)
+    if why:
+        return False, "Вакансия недоступна: " + why + "."
+    if p.act is not None or p.queue:
+        return False, "Сейчас вы заняты."
+    if career_blocked(p):
+        return False, f"Здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%: карьера заблокирована."
+    if p.energy < R.MIN_START_ENERGY:
+        return False, f"Мало сил: на смену можно выйти при энергии не ниже {R.MIN_START_ENERGY:.0f}%."
+    if p.money < 2 * vac.fare:
+        return False, f"Не хватает денег на проезд ({2 * vac.fare} м. туда и обратно)."
+    return True, ""
+
+def estimate(p: Player, vac) -> tuple:
+    """Прикидка: (зарплата брутто за полную смену, энергия к концу смены, хватит ли сил доработать)."""
+    pk = perks(exp_level(p.exp.get(vac.prof, 0.0)))
+    shift_h, com_h = vac.shift_min / 60, vac.commute_min / 60
+    k = R.LOW_HEALTH_DRAIN_MULT if p.health < R.HEALTH_SLOW else 1.0
+    cost = (abs(R.COMMUTE_ENERGY_RATE) * com_h
+            + abs(vac.rate_energy) * (1 - pk["res_energy"]) * shift_h) * k
+    left = p.energy - cost
+    gross = vac.wage * shift_h * happy_mult(p.happiness) * (1 + pk["bonus"])
+    return gross, left, left >= R.ENERGY_FORCED
+
+def start_job(p: Player, vac) -> str:
+    """Старт разовой смены: дорога, работа, дорога домой."""
+    pr = R.PROFESSIONS[vac.prof]
+    pk = perks(exp_level(p.exp.get(vac.prof, 0.0)))
+    commute_q = vac.commute_min // R.QUANTUM_MINUTES
+    road = {"energy": R.COMMUTE_ENERGY_RATE}
+    work = {"kind": "work", "title": pr["title"], "prof": vac.prof, "career": True,
+            "wage": vac.wage, "quanta": vac.shift_min // R.QUANTUM_MINUTES, "done_q": 0, "earned": 0.0,
+            "rates": {"energy": vac.rate_energy, "health": vac.rate_health, "happiness": vac.rate_happy},
+            "bonus": pk["bonus"], "res_neg": pk["res_neg"], "res_energy": pk["res_energy"]}
+    go = {"kind": "commute", "title": f"Дорога на работу ({pr['title']})", "career": True,
+          "quanta": commute_q, "done_q": 0, "rates": dict(road)}
+    home = {"kind": "commute", "title": "Дорога домой", "keep": True,
+            "quanta": commute_q, "done_q": 0, "rates": dict(road)}
+    p.money -= 2 * vac.fare
+    p.act, p.queue, p.view_vac = go, [work, home], None
+    return f"Вы взяли подработку «{pr['title']}». Вы выехали на работу."
 
 # ---------- Заморозка ----------
 

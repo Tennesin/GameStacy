@@ -3,7 +3,11 @@
 from datetime import datetime, timedelta
 
 from . import logic as L
+from . import market as M
 from . import rules as R
+
+PERK_TEXT = {1: "+2,5% к зарплате", 2: "+1,5% к сопротивлению негативным эффектам",
+             0: "+2% к сопротивлению расходу энергии"}
 
 def bar(value: float) -> str:
     n = int(round(max(0.0, min(100.0, value)) / 10))
@@ -14,6 +18,15 @@ def money(n: int) -> str:
 
 def ts(dt: datetime, style: str = "R") -> str:
     return f"<t:{int(dt.timestamp())}:{style}>"
+
+def dur(minutes: int) -> str:
+    h, m = divmod(int(minutes), 60)
+    if h and m:
+        return f"{h} ч {m} мин"
+    return f"{h} ч" if h else f"{m} мин"
+
+def title_of(prof) -> str:
+    return R.PROFESSIONS.get(prof, {}).get("title", "работа")
 
 def describe(ev) -> str:
     """Строка для списка «пока вас не было» или None, если событие показывать не нужно."""
@@ -37,8 +50,13 @@ def describe(ev) -> str:
             "здоровье упало слишком низко" if d["why"] == "health" else "вы ушли сами")
         return f"⚠️ Смена прервана ({why}): оплата снижена"
     if k == "paid":
-        text = f"💵 Зарплата: начислено {money(d['gross'])}, НДФЛ {money(d['tax'])}, на руки {money(d['net'])}"
+        who = f" ({title_of(d['prof'])})" if d.get("prof") else ""
+        text = (f"💵 Зарплата{who}: начислено {money(d['gross'])}, НДФЛ {money(d['tax'])}, "
+                f"на руки {money(d['net'])}")
         return text + ("; репутация %+.0f" % d["reputation"] if d["aborted"] else "")
+    if k == "level_up":
+        return (f"🆙 Опыт «{title_of(d['prof'])}»: уровень {d['level']}! "
+                f"{PERK_TEXT[d['level'] % 3]}")
     if k == "shift_void":
         return "⌛ Отработано меньше 15 минут: оплаты нет"
     if k == "finished":
@@ -46,6 +64,8 @@ def describe(ev) -> str:
             return "⏰ Вы проснулись"
         if d["activity"] == "hospital":
             return f"🏥 Выписка из больницы: здоровье {d['health']:.0f}%"
+        if d["activity"] == "work":
+            return "✅ Смена закончена"
     return None
 
 def activity_text(p) -> str:
@@ -83,6 +103,9 @@ def status_text(p, now: datetime, tz) -> str:
             lines.append(f"📞 Вам названивают: давление {p.debt_pressure}/{R.DEBT_PRESSURE_MAX}. "
                          "Чем дольше долг не гасится, тем хуже репутация и настроение.")
     lines.append(f"🏠 {h['title']} · 🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
+    exps = [f"{title_of(k)} — ур. {L.exp_level(v)}" for k, v in p.exp.items() if L.exp_level(v) > 0]
+    if exps:
+        lines += ["", "🛠 **Опыт:** " + ", ".join(exps)]
     if p.frozen_at is None:
         lines.append(f"Следующее списание: {ts(L.next_midnight(p.updated, tz))}")
     else:
@@ -106,14 +129,75 @@ def status_text(p, now: datetime, tz) -> str:
         lines += [""] + warns
     return "\n".join(lines)
 
-def render(screen: str, p, now: datetime, tz, events: list, note: str = "") -> str:
+# ---------- Рынок вакансий ----------
+
+def vacancy_line(p, v) -> str:
+    pr = R.PROFESSIONS[v.prof]
+    mark = "🔒" if L.lock_reason(p, v) else "🟢"
+    kind = "разовая" if v.kind == "once" else "постоянная"
+    return (f"{mark} **№{v.id}** {pr['title']} · {kind} · {dur(v.shift_min)} · "
+            f"{v.wage:.0f} м./ч · ⏳ <t:{v.expires_ts}:R>")
+
+def jobs_text(p, vacs: list, now: datetime, tz) -> str:
+    head = ("🔨 **Рынок вакансий**\n"
+            "Список общий для сервера: кто успел, тому и работа. Сверху самые свежие. "
+            f"Следующее обновление {ts(M.next_window(now, tz))}.\n"
+            "🟢 доступна вам · 🔒 пока недоступна (причина внутри карточки)")
+    if not vacs:
+        return head + "\n\nСейчас вакансий нет: загляните после обновления."
+    return head + "\n\n" + "\n".join(vacancy_line(p, v) for v in vacs)
+
+def job_text(p, v, now: datetime) -> str:
+    pr = R.PROFESSIONS[v.prof]
+    lvl = L.exp_level(p.exp.get(v.prof, 0.0))
+    pk = L.perks(lvl)
+    gross, left, finishes = L.estimate(p, v)
+    kind = ("разовая подработка (начинается сразу, вакансия исчезнет с рынка)" if v.kind == "once"
+            else "постоянная работа")
+    lines = [
+        f"📄 **Вакансия №{v.id}: {pr['title']}**",
+        f"Тип: {kind}",
+        f"Смена: {dur(v.shift_min)} · дорога в одну сторону: {dur(v.commute_min)} "
+        f"· проезд: {v.fare} м. в каждую сторону",
+        f"Ставка: {v.wage:.1f} м./ч (брутто). С вашим счастьем (×{L.happy_mult(p.happiness):.2f}) "
+        f"и опытом (+{pk['bonus'] * 100:.1f}%) полная смена принесёт ≈ {money(int(gross))} до НДФЛ",
+        f"Нагрузка в час: энергия {v.rate_energy:+.1f}, здоровье {v.rate_health:+.2f}, "
+        f"счастье {v.rate_happy:+.2f}",
+        f"Ваш опыт: уровень {lvl} из {R.EXP_MAX_LEVEL} "
+        f"(сопротивление негативному {pk['res_neg'] * 100:.1f}%, расходу энергии {pk['res_energy'] * 100:.1f}%)",
+        f"Исчезнет {ts(datetime.fromtimestamp(v.expires_ts, tz=L.UTC))}",
+        "",
+    ]
+    if finishes:
+        lines.append(f"⚡ Прикидка: к концу смены энергии останется около {left:.0f}%.")
+    else:
+        lines.append(f"⚠️ Вы вряд ли доработаете: прикидка энергии к концу смены {left:.0f}%, "
+                     f"а ниже {R.ENERGY_FORCED:.0f}% смену прервут (оплата снизится, репутация упадёт).")
+    ok, why = L.can_take(p, v, int(now.timestamp()))
+    if not ok:
+        lines.append(f"🚫 Сейчас взять нельзя: {why}")
+    return "\n".join(lines)
+
+def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
+           jobs=None, vac=None, can: bool = False) -> str:
     """Полный текст сообщения панели для экрана screen."""
     if screen == "menu":
         text = ("💼 **Симулятор рабочего**\n"
                 f"💰 {money(p.money)} · ⚡ {p.energy:.0f}% · ❤️ {p.health:.0f}% · {activity_text(p)}\n\n"
                 "Выберите раздел. Игра идёт в реальном времени, даже когда вы не в сети.")
     elif screen == "career":
-        text = "💼 **Карьера**\nРаздел в разработке: здесь будут работа и образование."
+        text = ("💼 **Карьера**\nРабота: берите подработки на общем рынке вакансий. "
+                "Образование и биржа появятся позже.")
+    elif screen == "jobs":
+        text = jobs_text(p, jobs or [], now, tz)
+    elif screen == "job" and vac is not None:
+        text = job_text(p, vac, now)
+    elif screen == "abort_confirm":
+        text = ("🚪 **Уйти со смены?**\nДосрочный уход считается срывом:\n"
+                f"• оплата за отработанное ×{R.ABORT_PAY_VOLUNTARY};\n"
+                f"• опыт ×{R.EXP_ABORT_MULT};\n"
+                f"• репутация −{R.REP_ABORT_VOLUNTARY:.0f}.\n"
+                "Дорога домой останется. Если отработано меньше 15 минут, оплаты не будет.")
     elif screen == "leisure":
         text = "🎭 **Досуг**\nРаздел в разработке: здесь будут магазин и развлечения."
     elif screen == "sleep":
@@ -130,7 +214,7 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "") -> s
         text = status_text(p, now, tz)
     lines = [text]
     shown = [t for t in (describe(e) for e in events) if t][-R.EVENTS_SHOWN:]
-    if shown and screen in ("status", "menu"):
+    if shown and screen in ("status", "menu", "career", "jobs"):
         lines += ["", "**Пока вас не было:**"] + shown
     if note:
         lines += ["", f"ℹ️ {note}"]

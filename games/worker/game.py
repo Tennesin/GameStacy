@@ -1,7 +1,7 @@
-"""Контроллер симулятора рабочего: личная панель (скрытые сообщения), действия игрока, заморозка.
-Фоновых задач нет: состояние рассчитывается при каждом нажатии (ленивая симуляция, см. logic.py)."""
+"""Контроллер симулятора рабочего: личная панель (скрытые сообщения), действия игрока, рынок вакансий."""
 import logging
 import math
+import random
 
 import discord
 from discord import app_commands
@@ -9,10 +9,11 @@ from discord import app_commands
 from config import TZ
 from core.locks import LockMap
 from . import logic as L
+from . import market as M
 from . import rules as R
 from .storage import StorageRegistry
 from .texts import money, render
-from .views import ALL_SPECS, PanelView, build_specs
+from .views import PanelView, build_specs, persistent_views
 
 log = logging.getLogger("stacy.worker")
 
@@ -20,6 +21,7 @@ class WorkerController:
     def __init__(self, bot, registry: StorageRegistry):
         self.bot = bot
         self.registry = registry
+        self.rng = random.Random()
         self.locks = LockMap()                      # по блокировке на (сервер, игрок)
 
     async def open_panel(self, interaction: discord.Interaction):
@@ -31,22 +33,38 @@ class WorkerController:
             return
         uid, gid = interaction.user.id, interaction.guild_id
         async with self.locks[(gid, uid)]:
-            # Между получением хранилища и записью нет await: подключение не вытеснится из кэша
+            # Внутри блока нет await: подключение не вытеснится из кэша, а клики не перемешаются
             store = self.registry.get(gid)
             now = self.bot.clock.now()
             p = store.get_player(uid) or L.new_player(uid, now)
             events = L.catch_up(p, now, TZ)
-            screen, note = self._apply(p, action, value, now, events)
-            store.save_player(p)
-        text = render(screen, p, now, TZ, events, note)
-        view = PanelView(self, build_specs(screen, p))
+            try:
+                screen, note = self._apply(store, p, action, value, now, events)
+                ctx = self._context(store, screen, p, now)
+                store.save_player(p)                # коммит: игрок и (при взятии) вакансия вместе
+            except Exception:
+                store.con.rollback()
+                raise
+        text = render(screen, p, now, TZ, events, note, **ctx)
+        view = PanelView(self, build_specs(screen, p, **ctx))
         if first:
             await interaction.response.send_message(text, view=view, ephemeral=True)
         else:
             await interaction.response.edit_message(content=text, view=view)
 
-    def _apply(self, p: L.Player, action: str, value, now, events: list) -> tuple:
+    def _context(self, store, screen: str, p: L.Player, now) -> dict:
+        """Данные рынка для отрисовки экрана."""
+        ts = int(now.timestamp())
+        if screen == "jobs":
+            return {"jobs": store.list_vacancies(ts)}
+        if screen == "job":
+            v = store.get_vacancy(p.view_vac) if p.view_vac else None
+            return {"vac": v, "can": L.can_take(p, v, ts)[0]}
+        return {}
+
+    def _apply(self, store, p: L.Player, action: str, value, now, events: list) -> tuple:
         """Выполняет действие над игроком. Возвращает (экран, пояснение)."""
+        ts = int(now.timestamp())
         if p.frozen_at is not None:
             if action == "unfreeze":
                 ok, msg = L.unfreeze(p, now, TZ)
@@ -58,6 +76,43 @@ class WorkerController:
         if action in ("status", "refresh"):
             return "status", ""
 
+        # ----- рынок вакансий -----
+        if action == "jobs":
+            M.ensure_market(store, now, TZ, self.rng)
+            p.view_vac = None
+            return "jobs", ""
+        if action == "job_pick":
+            M.ensure_market(store, now, TZ, self.rng)
+            v = store.get_vacancy(int(value)) if value and value.isdigit() else None
+            if v is None or not v.alive(ts):
+                p.view_vac = None
+                return "jobs", "Эту вакансию уже забрали или она исчезла."
+            p.view_vac = v.id
+            return "job", ""
+        if action == "take":
+            M.ensure_market(store, now, TZ, self.rng)
+            v = store.get_vacancy(p.view_vac) if p.view_vac else None
+            ok, msg = L.can_take(p, v, ts)
+            if not ok:
+                gone = v is None or not v.alive(ts)
+                if gone:
+                    p.view_vac = None
+                return ("jobs" if gone else "job"), msg
+            if not store.claim_vacancy(v.id, p.uid, ts):
+                p.view_vac = None
+                return "jobs", "Эту вакансию только что забрали."
+            return "status", L.start_job(p, v)
+
+        if action == "abort":
+            if p.act and p.act.get("career"):
+                return "abort_confirm", ""
+            return "status", "Сейчас нет смены."
+        if action == "abort_yes":
+            ok, msg, evs = L.abort_shift(p, TZ)
+            events.extend(evs)
+            return "status", msg
+
+        # ----- сон, долг, заморозка -----
         if action == "nav_sleep":
             ok, msg = L.can_sleep(p)
             return ("sleep", "") if ok else ("status", msg)
@@ -97,7 +152,8 @@ class WorkerController:
 def setup(bot):
     """Точка входа игры: вызывается из main.py."""
     ctrl = WorkerController(bot, StorageRegistry())
-    bot.add_view(PanelView(ctrl, ALL_SPECS))        # кнопки работают и после перезапуска бота
+    for view in persistent_views(ctrl):             # кнопки работают и после перезапуска бота
+        bot.add_view(view)
 
     @app_commands.command(name="work", description="Симулятор рабочего: открыть личную панель")
     @app_commands.guild_only()
