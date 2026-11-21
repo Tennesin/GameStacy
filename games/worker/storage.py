@@ -1,8 +1,6 @@
-"""Хранилище симулятора рабочего: отдельный файл БД на каждый сервер (data/games/worker/<ID_сервера>.db).
-Миграции только ДОБАВЛЯТЬ новым элементом списка, старые не менять.
-Подключения кэшируются с ограничением. Не держите GuildStorage через await: при вытеснении
-из кэша подключение закрывается."""
+"""Хранилище симулятора рабочего: отдельный файл БД на каждый сервер."""
 import json
+import sqlite3
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
@@ -59,6 +57,7 @@ def _vac(row) -> Vacancy:
 
 class GuildStorage:
     def __init__(self, path: Path):
+        self.path = Path(path)
         self.con = connect(path, MIGRATIONS)
 
     # ---------- Игроки ----------
@@ -66,6 +65,37 @@ class GuildStorage:
     def get_player(self, uid: int) -> Optional[Player]:
         row = self.con.execute("SELECT state_json FROM players WHERE uid=?", (uid,)).fetchone()
         return Player.restore(json.loads(row["state_json"])) if row else None
+
+    # ---------- Сброс (консоль) ----------
+
+    def count_players(self) -> int:
+        return self.con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+
+    def reset_player(self, uid: int) -> bool:
+        with self.con:
+            cur = self.con.execute("DELETE FROM players WHERE uid=?", (uid,))
+        return cur.rowcount > 0
+
+    def reset_all(self) -> int:
+        """Удаляет всех игроков и рынок вакансий. Возвращает число удалённых игроков."""
+        with self.con:
+            cur = self.con.execute("DELETE FROM players")
+            removed = cur.rowcount
+            self.con.execute("DELETE FROM vacancies")
+            self.con.execute("DELETE FROM meta WHERE key='market_window'")
+            self.con.execute("DELETE FROM sqlite_sequence WHERE name='vacancies'")
+        return removed
+
+    def backup(self, folder: Path, stamp: str) -> Path:
+        """Корректная копия базы (с учётом журнала WAL). Возвращает путь к файлу."""
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / f"{self.path.stem}_{stamp}.bak"
+        dst = sqlite3.connect(dest)
+        try:
+            self.con.backup(dst)
+        finally:
+            dst.close()
+        return dest
 
     def save_player(self, p: Player):
         """Коммитит ВСЮ открытую транзакцию (в том числе claim_vacancy, сделанный перед ним)."""
@@ -130,13 +160,17 @@ class GuildStorage:
         self.con.close()
 
 class StorageRegistry:
-    """ID сервера -> хранилище. Файл создаётся и мигрируется при первом обращении."""
+    """ID сервера -> хранилище."""
 
     def __init__(self, base: Optional[Path] = None, limit: int = 6):
         self.base = Path(base) if base else GAMES_DATA_DIR / "worker"
         self.base.mkdir(parents=True, exist_ok=True)
         self.limit = limit
         self._cache: OrderedDict = OrderedDict()
+
+    def exists(self, guild_id: int) -> bool:
+        """Есть ли файл базы этого сервера (не создаёт его)."""
+        return (self.base / f"{int(guild_id)}.db").exists()
 
     def get(self, guild_id: int) -> GuildStorage:
         st = self._cache.get(guild_id)

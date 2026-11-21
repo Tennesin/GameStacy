@@ -451,10 +451,14 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
                 "Недельная премия за текущую неделю сгорит. Вакансия обратно на рынок не вернётся.")
     else:
         text = status_text(p, now, tz)
-    lines = [text]
+    tail = []
     shown = [t for t in (describe(e) for e in events) if t][-R.EVENTS_SHOWN:]
-    if shown and screen in SHOW_EVENTS_ON:
-        lines += ["", "**Пока вас не было:**"] + shown
+    if shown:
+        tail += ["", "**Пока вас не было:**"] + shown
     if note:
-        lines += ["", f"ℹ️ {note}"]
-    return "\n".join(lines)[:1990]
+        tail += ["", f"ℹ️ {note}"]
+    tail_text = "".join("\n" + x for x in tail)
+    room = 1990 - len(tail_text)
+    if len(text) > room:
+        text = text[:max(0, room - 1)] + "…"
+    return text + tail_text

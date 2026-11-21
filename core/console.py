@@ -15,6 +15,17 @@ def start_console(bot):
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
+    async def ask(prompt: str) -> str:
+        """Задаёт вопрос в консоли и возвращает следующую введённую строку."""
+        print(prompt, end="", flush=True)
+        try:
+            return (await asyncio.wait_for(queue.get(), timeout=300)).strip()
+        except asyncio.TimeoutError:
+            print("\nВремя ожидания ответа вышло.", flush=True)
+            return ""
+
+    bot.console_ask = ask
+
     def reader():
         for line in sys.stdin:
             loop.call_soon_threadsafe(queue.put_nowait, line)

@@ -550,8 +550,13 @@ def wake(p: Player, tz: tzinfo) -> tuple:
 
 def abort_shift(p: Player, tz: tzinfo) -> tuple:
     """Добровольный уход со смены или учёбы (срыв). Возвращает ok, текст, события."""
-    if not p.act or not p.act.get("career"):
+    act = p.act
+    if not act or not act.get("career"):
         return False, "Сейчас нет смены.", []
+    if act["kind"] == "commute" and act.get("perm") and p.job is not None:
+        p.job["week_ok"] = False
+        p.job["worked_day"] = None
+        p.reputation = clamp(p.reputation - R.REP_ABORT_VOLUNTARY)
     sim = Sim(p, tz)
     sim._interrupt("voluntary", "voluntary")
     return True, "Вы ушли со смены раньше срока.", sim.events

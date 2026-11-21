@@ -3,6 +3,7 @@
 import logging
 import math
 import random
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -12,11 +13,25 @@ from core.locks import LockMap
 from . import logic as L
 from . import market as M
 from . import rules as R
+from .console import console_work
 from .storage import StorageRegistry
 from .texts import money, render
-from .views import PanelView, build_specs, persistent_views
+from .views import ConfirmView, PanelView, build_specs, persistent_views
 
 log = logging.getLogger("stacy.worker")
+
+# Экраны-подтверждения показываются скрытым сообщением; «Да» запускает указанное действие
+CONFIRM_YES = {"quit_confirm": "quit_yes", "abort_confirm": "abort_yes", "freeze_confirm": "freeze_yes"}
+
+def panel_owner_id(message) -> Optional[int]:
+    """Кто открыл панель командой /work. None - узнать не удалось (тогда клик пропускается)."""
+    if message is None:
+        return None
+    meta = getattr(message, "interaction_metadata", None)
+    user = getattr(meta, "user", None)
+    if user is None:
+        user = getattr(getattr(message, "interaction", None), "user", None)   # discord.py до 2.4
+    return user.id if user is not None else None
 
 class WorkerController:
     def __init__(self, bot, registry: StorageRegistry):
@@ -32,6 +47,38 @@ class WorkerController:
         if interaction.guild_id is None:
             await interaction.response.send_message("Игра работает только на сервере.", ephemeral=True)
             return
+        if not first:                                   # панель публичная: чужие клики не принимаем
+            owner = panel_owner_id(interaction.message)
+            if owner is not None and owner != interaction.user.id:
+                await interaction.response.send_message(
+                    "Это панель другого игрока. Откройте свою командой /work.", ephemeral=True)
+                return
+
+        screen, text, specs = await self._process(interaction, action, value)
+
+        if screen in CONFIRM_YES:                       # подтверждение видит только сам игрок
+            view = ConfirmView(self, CONFIRM_YES[screen], interaction.message)
+            await interaction.response.send_message(text, view=view, ephemeral=True)
+            view.origin = interaction
+            return
+        view = PanelView(self, specs)
+        if first:
+            await interaction.response.send_message(text, view=view)
+        else:
+            await interaction.response.edit_message(content=text, view=view)
+
+    async def on_confirm(self, interaction: discord.Interaction, yes_action: str, panel):
+        """Нажата «Да» в скрытом окне: действие выполняется, публичная панель обновляется."""
+        screen, text, specs = await self._process(interaction, yes_action, None)
+        view = PanelView(self, specs)
+        await interaction.response.edit_message(content="✅ Готово.", view=None)
+        try:
+            await panel.edit(content=text, view=view)
+        except (discord.HTTPException, AttributeError):
+            await interaction.followup.send(text, view=view, ephemeral=True)   # панель недоступна: покажем скрыто
+
+    async def _process(self, interaction: discord.Interaction, action: str, value):
+        """Выполняет действие под блокировкой. Возвращает (экран, текст, элементы)."""
         uid, gid = interaction.user.id, interaction.guild_id
         async with self.locks[(gid, uid)]:
             # Внутри блока нет await: подключение не вытеснится из кэша, а клики не перемешаются
@@ -42,16 +89,16 @@ class WorkerController:
             try:
                 screen, note = self._apply(store, p, action, value, now, events)
                 ctx = self._context(store, screen, p, now)
-                store.save_player(p)                # коммит: игрок и (при взятии) вакансия вместе
+                if screen in CONFIRM_YES:
+                    store.con.rollback()    # окно подтверждения ничего не меняет: события не «съедаем»
+                    events = []
+                else:
+                    store.save_player(p)    # коммит: игрок и (при взятии) вакансия вместе
             except Exception:
                 store.con.rollback()
                 raise
         text = render(screen, p, now, TZ, events, note, **ctx)
-        view = PanelView(self, build_specs(screen, p, **ctx))
-        if first:
-            await interaction.response.send_message(text, view=view, ephemeral=True)
-        else:
-            await interaction.response.edit_message(content=text, view=view)
+        return screen, text, build_specs(screen, p, **ctx)
 
     def _context(self, store, screen: str, p: L.Player, now) -> dict:
         """Данные рынка вакансий для отрисовки экрана."""
@@ -221,8 +268,9 @@ def setup(bot):
     ctrl = WorkerController(bot, StorageRegistry())
     for view in persistent_views(ctrl):             # кнопки работают и после перезапуска бота
         bot.add_view(view)
+    bot.console_commands["-work"] = console_work(ctrl)
 
-    @app_commands.command(name="work", description="Симулятор рабочего: открыть личную панель")
+    @app_commands.command(name="work", description="Симулятор рабочего: открыть свою панель")
     @app_commands.guild_only()
     async def work(interaction: discord.Interaction):
         await ctrl.open_panel(interaction)

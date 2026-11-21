@@ -1,4 +1,5 @@
 """Кнопки симулятора рабочего."""
+from contextlib import suppress
 from typing import NamedTuple, Optional
 
 import discord
@@ -210,6 +211,36 @@ class PanelView(discord.ui.View):
         if is_expired(error):
             return
         await report_error(interaction, error)
+
+class ConfirmView(discord.ui.View):
+    """Скрытое окно подтверждения. Не постоянное: живёт 2 минуты.
+    «Да» выполняет действие и обновляет публичную панель (panel - её сообщение)."""
+
+    def __init__(self, ctrl, yes_action: str, panel):
+        super().__init__(timeout=120)
+        self.ctrl, self.yes_action, self.panel = ctrl, yes_action, panel
+        self.origin = None          # нажатие, открывшее это окно (для правки по тайм-ауту)
+
+    @discord.ui.button(label="✅ Да", style=DANGER)
+    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await self.ctrl.on_confirm(interaction, self.yes_action, self.panel)
+
+    @discord.ui.button(label="Отмена", style=SECONDARY)
+    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Отменено.", view=None)
+
+    async def on_timeout(self):
+        if self.origin is not None:
+            with suppress(discord.HTTPException):
+                await self.origin.edit_original_response(content="Время вышло: ничего не изменено.", view=None)
+
+    async def on_error(self, interaction, error, item):
+        if is_expired(error):
+            return
+        await report_error(interaction, error)
+        self.stop()
 
 def _chunks(items: list, n: int) -> list:
     return [items[i:i + n] for i in range(0, len(items), n)]
