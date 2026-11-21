@@ -91,7 +91,8 @@ class Player:
     last_unfreeze: Optional[datetime] = None
     week_start: Optional[str] = None        # понедельник текущей налоговой недели (ISO)
     week_income: int = 0                    # доход (брутто) за эту неделю
-    education: list = field(default_factory=list)   # коды из rules.EDUCATION (этап 5)
+    education: list = field(default_factory=list)
+    edu_progress: dict = field(default_factory=dict)   # программа -> минуты учёбы (прогресс сохраняется)
     exp: dict = field(default_factory=dict)         # профессия -> отработанные часы (опыт)
     view_vac: Optional[int] = None          # вакансия, открытая в панели (для кнопки «Взять»)
     venue: Optional[str] = None             # магазин, в котором игрок сейчас находится
@@ -113,7 +114,8 @@ class Player:
             "act": copy.deepcopy(self.act), "queue": copy.deepcopy(self.queue),
             "frozen_at": iso(self.frozen_at), "last_unfreeze": iso(self.last_unfreeze),
             "week_start": self.week_start, "week_income": self.week_income,
-            "education": list(self.education), "exp": dict(self.exp), "view_vac": self.view_vac,
+            "education": list(self.education), "edu_progress": dict(self.edu_progress),
+            "exp": dict(self.exp), "view_vac": self.view_vac,
             "venue": self.venue, "buffs": copy.deepcopy(self.buffs), "last_move": iso(self.last_move),
             "day_buys": dict(self.day_buys), "day_ent": dict(self.day_ent),
             "job": copy.deepcopy(self.job), "job_cooldown": iso(self.job_cooldown),
@@ -137,6 +139,7 @@ class Player:
         p.last_unfreeze = dt(d.get("last_unfreeze"))
         p.week_start = d.get("week_start")
         p.education = list(d.get("education") or [])
+        p.edu_progress = {str(k): int(v) for k, v in (d.get("edu_progress") or {}).items()}
         p.exp = {str(k): float(v) for k, v in (d.get("exp") or {}).items()}
         p.view_vac = d.get("view_vac")
         p.venue = d.get("venue")
@@ -240,10 +243,12 @@ class Sim:
                 act["quanta"] -= 1
             if act.get("wage"):
                 act["earned"] = act.get("earned", 0.0) + act["wage"] * QH * mult * (1 + act.get("bonus", 0.0))
-            if act.get("prof"):                            # опыт: «Концентрация» ускоряет его набор
+            if act.get("prof"):
                 act["xp"] = act.get("xp", 0.0) + 1.0 + buff_power(p, "learning")
+            if act.get("study"):
+                self._study_tick(act)
 
-        for bk in list(p.buffs):                           # баффы тикают в квантах
+        for bk in list(p.buffs):
             b = p.buffs[bk]
             b["left"] -= 1
             if b["left"] <= 0:
@@ -267,6 +272,15 @@ class Sim:
             p.act = None
             self._next()
             return
+        if act.get("study"):                               # этап 5: учёба прерывается мягко (здоровье, деньги)
+            why = ("health" if p.health < R.HEALTH_CAREER_BLOCK
+                   else "money" if p.money < math.ceil(act["tuition"] * QH) else None)
+            if why:
+                self.emit("interrupted", activity="study", why=why, reason="soft")
+                p.queue = [a for a in p.queue if a.get("keep")]
+                p.act = None
+                self._next()
+                return
         if act.get("career") and (p.energy < R.ENERGY_FORCED or p.health < R.HEALTH_CAREER_BLOCK):
             self._interrupt("forced", "energy" if p.energy < R.ENERGY_FORCED else "health")
 
@@ -278,6 +292,20 @@ class Sim:
             if p.energy >= 100.0:
                 return True
         return act.get("quanta") is not None and act["quanta"] <= 0
+
+    def _study_tick(self, act: dict):
+        """Один квант учёбы: поминутная оплата и прогресс."""
+        p = self.p
+        act["fee_f"] = act.get("fee_f", 0.0) + act["tuition"] * QH
+        whole = int(act["fee_f"])
+        if whole:
+            act["fee_f"] -= whole
+            p.money -= min(whole, p.money)
+        code = act["study"]
+        p.edu_progress[code] = p.edu_progress.get(code, 0) + R.QUANTUM_MINUTES
+        if p.edu_progress[code] >= R.EDUCATION[code]["hours"] * 60 and code not in p.education:
+            p.education.append(code)
+            self.emit("edu_done", edu=code)
 
     # ----- смена активностей -----
 
@@ -571,7 +599,8 @@ def lock_reason(p: Player, vac) -> str:
     pr = R.PROFESSIONS[vac.prof]
     missing = [R.EDUCATION[e]["title"] for e in pr["edu"] if e not in p.education]
     if missing:
-        return "нужно образование: " + ", ".join(missing)
+        return ("нужно образование: " + ", ".join(missing)
+                + " (получить можно в «Карьера» → «Образование»)")
     if p.reputation < vac.min_rep:
         return f"нужна репутация {vac.min_rep} (у вас {p.reputation:.0f})"
     if vac.kind == "perm" and not R.PERMANENT_ENABLED:
@@ -898,6 +927,53 @@ def stop_leisure(p: Player, tz: tzinfo) -> tuple:
     sim._finish()
     return True, "Вы закончили досуг раньше срока.", sim.events
 
+# ---------- Образование ----------
+
+def edu_missing(p: Player, code: str) -> list:
+    """Названия программ, которые нужно получить заранее."""
+    return [R.EDUCATION[e]["title"] for e in R.EDUCATION[code]["need"] if e not in p.education]
+
+def edu_left_min(p: Player, code: str) -> int:
+    """Сколько минут учёбы осталось до получения."""
+    return max(0, R.EDUCATION[code]["hours"] * 60 - p.edu_progress.get(code, 0))
+
+def start_study(p: Player, code: str, hours: int) -> tuple:
+    """Занятие до `hours` часов (но не дольше, чем осталось до конца программы). Деньги списываются поминутно."""
+    e = R.EDUCATION.get(code)
+    if e is None or hours not in R.EDU_SESSION_HOURS:
+        return False, "Такой программы нет."
+    if code in p.education:
+        return False, "Это образование уже получено."
+    missing = edu_missing(p, code)
+    if missing:
+        return False, "Сначала нужно получить: " + ", ".join(missing) + "."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
+    if career_blocked(p):
+        return False, f"Здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%: учёба недоступна."
+    if p.energy < R.EDU_MIN_ENERGY:
+        return False, f"Слишком мало сил: на занятие можно прийти при энергии не ниже {R.EDU_MIN_ENERGY:.0f}%."
+    if p.money < e["fee"]:
+        return False, f"Не хватает денег: час учёбы стоит {e['fee']} м."
+    q = min(hours * 60 // R.QUANTUM_MINUTES, math.ceil(edu_left_min(p, code) / R.QUANTUM_MINUTES))
+    if q <= 0:
+        return False, "Эта программа уже пройдена."
+    p.act = {"kind": "study", "title": f"Учёба: {e['title']}", "guard": True, "study": code,
+             "tuition": e["fee"], "quanta": q, "done_q": 0,
+             "rates": {"energy": R.EDU_ENERGY_RATE, "happiness": R.EDU_HAPPY_RATE}}
+    return True, f"Вы начали учёбу: {e['title']} ({q * R.QUANTUM_MINUTES / 60:g} ч)."
+
+def stop_study(p: Player, tz: tzinfo) -> tuple:
+    """Закончить занятие раньше срока: без штрафов, прогресс сохраняется. Возвращает ok, текст, события."""
+    if not p.act or p.act["kind"] != "study":
+        return False, "Сейчас вы не учитесь.", []
+    sim = Sim(p, tz)
+    sim._finish()
+    return True, "Вы закончили занятие раньше срока: прогресс сохранён, штрафов нет.", sim.events
+
 # ---------- Заморозка ----------
 
 def _fmt(dt: datetime, tz: tzinfo) -> str:
@@ -908,7 +984,7 @@ def can_freeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
         return False, "Игра уже заморожена."
     if p.venue:
         return False, "Сначала выйдите из магазина."
-    if p.act and (p.act.get("career") or p.act["kind"] == "hospital"):
+    if p.act and (p.act.get("career") or p.act.get("study") or p.act["kind"] == "hospital"):
         return False, "Заморозка недоступна во время смены, учёбы и лечения: сначала закончите дело."
     if p.last_unfreeze:
         until = p.last_unfreeze + timedelta(days=R.FREEZE_COOLDOWN_DAYS)

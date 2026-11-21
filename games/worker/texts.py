@@ -9,7 +9,8 @@ PERK_TEXT = {1: "+2,5% к зарплате", 2: "+1,5% к сопротивлен
              0: "+2% к сопротивлению расходу энергии"}
 SHOW_EVENTS_ON = (
     "status", "menu", "career", "jobs", "leisure", "market",
-    "venue", "ent", "hospital", "housing", "myjob")
+    "venue", "ent", "hospital", "housing", "myjob", "edu"
+)
 WD_NAMES = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 def bar(value: float) -> str:
@@ -64,7 +65,12 @@ def describe(ev) -> str:
         return "🛌 Силы на исходе: вы идёте спать и не проснётесь, пока не восстановитесь"
     if k == "interrupted":
         if d.get("reason") == "soft":
-            return "⚠️ Занятие прервано: энергия на исходе"
+            tail = " Прогресс сохранён." if d.get("activity") == "study" else ""
+            if d.get("why") == "money":
+                return "⚠️ Учёба прервана: не хватает денег на оплату." + tail
+            if d.get("why") == "health":
+                return "⚠️ Учёба прервана: здоровье слишком низкое." + tail
+            return "⚠️ Занятие прервано: энергия на исходе." + tail
         why = "не хватило энергии" if d["why"] == "energy" else (
             "здоровье упало слишком низко" if d["why"] == "health" else "вы ушли сами")
         return f"⚠️ Смена прервана ({why}): оплата снижена"
@@ -94,6 +100,8 @@ def describe(ev) -> str:
             return "🏠 Вы вернулись домой"
         if d["activity"] == "leisure":
             return "🎭 Занятие закончилось"
+        if d["activity"] == "study":
+            return "📚 Занятие закончено"
         if d["activity"] == "course":
             c = R.COURSES[d["course"]]
             return (f"🎓 Курс «{c['title']}» закончен: {buff_desc(c['kind'], c['power'])} "
@@ -107,6 +115,9 @@ def describe(ev) -> str:
     if k == "week_bonus":
         return (f"🎁 Недельная премия: начислено {money(d['gross'])}, НДФЛ {money(d['tax'])}, "
                 f"на руки {money(d['net'])}")
+    if k == "edu_done":
+        e = R.EDUCATION.get(d["edu"])
+        return f"🎓 Получено: {e['title'] if e else d['edu']}! Теперь вам доступны новые вакансии"
     return None
 
 def activity_text(p) -> str:
@@ -161,6 +172,9 @@ def status_text(p, now: datetime, tz) -> str:
     exps = [f"{title_of(k)} — ур. {L.exp_level(v)}" for k, v in p.exp.items() if L.exp_level(v) > 0]
     if exps:
         lines += ["", "🛠 **Опыт:** " + ", ".join(exps)]
+    if p.education:
+        lines.append("🎓 **Образование:** " + ", ".join(
+            R.EDUCATION[c]["title"] for c in p.education if c in R.EDUCATION))
     bt = buffs_text(p)
     if bt:
         lines.append(bt)
@@ -357,6 +371,33 @@ def myjob_text(p, now: datetime, tz) -> str:
     ]
     return "\n".join(lines)
 
+def edu_unlocks(code: str) -> str:
+    """Какие профессии требуют эту программу."""
+    return ", ".join(pr["title"] for pr in R.PROFESSIONS.values() if code in pr["edu"])
+
+def edu_text(p) -> str:
+    lines = ["🎓 **Образование**",
+             "Учёба идёт по часам, оплата списывается по минутам, пока вы учитесь. Закончить можно в любой "
+             "момент: штрафов нет, прогресс сохраняется. Если кончатся деньги или силы, занятие прервётся само.",
+             f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%", ""]
+    for code, e in R.EDUCATION.items():
+        if code in p.education:
+            lines.append(f"✅ **{e['title']}** — получено")
+            continue
+        need_min = e["hours"] * 60
+        done = min(need_min, p.edu_progress.get(code, 0))
+        base = (f"**{e['title']}** — {e['hours']} ч · {e['fee']} м./ч "
+                f"(≈ {money(e['hours'] * e['fee'])} всего)")
+        unlocks = edu_unlocks(code)
+        tail = f" · нужно для: {unlocks}" if unlocks else ""
+        missing = L.edu_missing(p, code)
+        if missing:
+            lines.append(f"🔒 {base} · сначала: {', '.join(missing)}{tail}")
+        else:
+            prog = f" · пройдено {done / 60:.1f} из {e['hours']} ч ({done * 100 // need_min}%)" if done else ""
+            lines.append(f"📖 {base}{prog}{tail}")
+    return "\n".join(lines)
+
 def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
            jobs=None, vac=None, can: bool = False) -> str:
     """Полный текст сообщения панели для экрана screen."""
@@ -364,8 +405,12 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = ("💼 **Симулятор рабочего**\n"
                 f"💰 {money(p.money)} · ⚡ {p.energy:.0f}% · ❤️ {p.health:.0f}% · {activity_text(p)}\n\n"
                 "Выберите раздел. Игра идёт в реальном времени, даже когда вы не в сети.")
+    elif screen == "career":
         text = ("💼 **Карьера**\nРабота: подработки и постоянные места на общем рынке вакансий; "
-                "«Моя работа» — ваш договор и выход на смену.")
+                "«Моя работа» — ваш договор и выход на смену; «Образование» — учёба, которая открывает "
+                "новые вакансии.")
+    elif screen == "edu":
+        text = edu_text(p)
     elif screen == "jobs":
         text = jobs_text(p, jobs or [], now, tz)
     elif screen == "job" and vac is not None:

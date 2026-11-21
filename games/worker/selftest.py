@@ -504,6 +504,70 @@ def test_permanent():
     assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
     print("постоянная работа: OK")
 
+# ---------- Этап 5 ----------
+
+def test_education():
+    # поминутная оплата и прогресс
+    p = L.new_player(1, T0)
+    p.money = 1000
+    assert not L.start_study(p, "college", 2)[0]               # нет школы
+    assert L.start_study(p, "school", 2)[0] and p.money == 1000 # заранее ничего не списано
+    L.catch_up(p, at(1), TZ)
+    assert p.act and p.act["kind"] == "study" and p.edu_progress["school"] == 60
+    assert abs((1000 - p.money) - R.EDUCATION["school"]["fee"]) <= 1   # за час - стоимость часа
+    L.catch_up(p, at(3), TZ)
+    assert p.act is None and p.edu_progress["school"] == 120 and "school" not in p.education
+
+    # выпуск ровно в тот квант, когда набраны часы; занятие не длиннее остатка
+    q = L.new_player(2, T0)
+    q.money = 5000
+    q.edu_progress["school"] = R.EDUCATION["school"]["hours"] * 60 - 30
+    assert L.start_study(q, "school", 4)[0] and q.act["quanta"] == 6
+    ev = L.catch_up(q, at(2), TZ)
+    assert "edu_done" in kinds(ev) and "school" in q.education and q.act is None
+    assert not L.start_study(q, "school", 1)[0]                # уже получено
+    assert not L.start_study(q, "course_med", 1)[0]            # нужен колледж
+    assert L.start_study(q, "course_acc", 1)[0]                # нужна только школа
+
+    # деньги кончились: мягкое прерывание без штрафов, прогресс сохранён
+    r = L.new_player(3, T0)
+    r.money = 25
+    assert L.start_study(r, "school", 4)[0]
+    ev = L.catch_up(r, at(4), TZ)
+    stop = next(e for e in ev if e.kind == "interrupted")
+    assert stop.data["why"] == "money" and stop.data["reason"] == "soft"
+    assert r.act is None and 0 < r.edu_progress["school"] < 240
+    assert r.reputation == R.START_REPUTATION and r.money <= 1 and r.debt == 0
+
+    # мало сил, заморозка, досрочное окончание
+    t = L.new_player(4, T0)
+    t.energy = 20.0
+    assert not L.start_study(t, "school", 1)[0]
+    u = L.new_player(5, T0)
+    assert L.start_study(u, "school", 4)[0]
+    assert not L.freeze(u, T0, TZ)[0]                          # во время учёбы нельзя
+    L.catch_up(u, at(1), TZ)
+    ok, _, evs = L.stop_study(u, TZ)
+    assert ok and u.act is None and u.edu_progress["school"] == 60 and u.reputation == R.START_REPUTATION
+
+    # бухгалтер бывает и разовым
+    assert "once" in R.PROFESSIONS["accountant"]["kinds"] and "perm" in R.PROFESSIONS["accountant"]["kinds"]
+    rng = random.Random(3)
+    assert "accountant" in {M.generate("once", TS0, TS0, rng)["prof"] for _ in range(3000)}
+    a = L.new_player(6, T0)
+    a.education, a.reputation = ["school", "college", "course_acc"], 50.0
+    v = make_vac("accountant", 4)
+    assert L.can_take(a, v, TS0)[0]
+    L.start_job(a, v)
+    ev = L.catch_up(a, at(6), TZ)
+    paid = next(e for e in ev if e.kind == "paid")
+    assert paid.data["prof"] == "accountant" and not paid.data["aborted"]
+
+    # снимок
+    p.edu_progress = {"school": 120}
+    assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
+    print("образование: OK")
+
 def main():
     test_tax()
     test_sleep()
@@ -526,6 +590,7 @@ def main():
     test_leisure()
     test_snapshot_stage2()
     test_permanent()
+    test_education()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

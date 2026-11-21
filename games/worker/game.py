@@ -77,7 +77,7 @@ class WorkerController:
             note = "" if action in ("market", "menu", "leisure") else "Сначала выйдите из магазина."
             return "venue", note
 
-        if action in ("menu", "career", "leisure", "market", "ent", "housing"):
+        if action in ("menu", "career", "leisure", "market", "ent", "housing", "edu"):
             return action, ""
         if action == "nav_hosp":
             return "hospital", ""
@@ -112,6 +112,18 @@ class WorkerController:
         if action == "house_go":
             ok, msg = L.move_housing(p, value or "", now, TZ)
             return ("status" if ok else "housing"), msg
+
+        # ----- образование -----
+        if action == "edu_go":
+            code, _, h = (value or "").partition(":")
+            if not h.isdigit():
+                return "edu", "Не удалось понять выбор."
+            ok, msg = L.start_study(p, code, int(h))
+            return ("status" if ok else "edu"), msg
+        if action == "stop_study":
+            ok, msg, evs = L.stop_study(p, TZ)
+            events.extend(evs)
+            return "status", msg
 
         # ----- рынок вакансий -----
         if action == "jobs":

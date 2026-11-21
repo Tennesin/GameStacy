@@ -38,12 +38,14 @@ ALL_SPECS = [
     Spec("stop_leisure", "🏁 Закончить досуг", PRIMARY, 3),
     Spec("myjob", "📑 Моя работа", PRIMARY, 0), Spec("shift_go", "▶ Выйти на смену", SUCCESS, 0),
     Spec("quit", "📤 Уволиться", DANGER, 0), Spec("quit_yes", "✅ Да, уволиться", DANGER, 0),
+    Spec("edu", "🎓 Образование", PRIMARY, 0), Spec("stop_study", "🏁 Закончить учёбу", PRIMARY, 3),
     Spec("sleep", "Сколько спать?", None, 3, "select"),
     Spec("job_pick", "Выберите вакансию", None, 4, "select"),
     Spec("buy", "Что купить?", None, 4, "select"),
     Spec("ent_go", "Куда пойти?", None, 4, "select"),
     Spec("course_go", "Выберите курс", None, 4, "select"),
     Spec("house_go", "Куда переехать?", None, 4, "select"),
+    Spec("edu_go", "Чему учиться?", None, 4, "select"),
 ]
 
 def sleep_opts() -> list:
@@ -78,6 +80,18 @@ def house_opts(p) -> list:
              f"счастье → {h['base']:.0f}% · переезд {L.move_cost(code)} м."[:100])
             for code, h in R.HOUSING.items() if code != p.housing]
 
+def edu_opts(p) -> list:
+    opts = []
+    for code, e in R.EDUCATION.items():
+        if code in p.education or L.edu_missing(p, code):
+            continue
+        done = p.edu_progress.get(code, 0)
+        pct = min(100, done * 100 // (e["hours"] * 60))
+        for h in R.EDU_SESSION_HOURS:
+            opts.append((f"{e['title']} · до {h} ч · ≈{e['fee'] * h} м."[:100], f"{code}:{h}",
+                         f"пройдено {pct}% · {e['fee']} м./ч"[:100]))
+    return opts
+
 def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> list:
     """Какие элементы показывать на экране."""
     if screen == "menu":
@@ -85,7 +99,11 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
                 Spec("status", "📋 Моё состояние", SECONDARY, 0)]
     if screen == "career":
         return [Spec("jobs", "🔨 Работа", PRIMARY, 0), Spec("myjob", "📑 Моя работа", PRIMARY, 0),
-                Spec("menu", "◀ Назад", SECONDARY, 0)]
+                Spec("edu", "🎓 Образование", PRIMARY, 0), Spec("menu", "◀ Назад", SECONDARY, 0)]
+    if screen == "edu":
+        opts = edu_opts(p)
+        specs = [Spec("edu_go", "Чему учиться?", None, 0, "select", opts)] if opts else []
+        return specs + [Spec("career", "◀ Назад", SECONDARY, 1)]
     if screen == "myjob":
         specs = []
         if p is not None and p.job is not None:
@@ -150,6 +168,8 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         specs.append(Spec("abort", "🚪 Уйти со смены", DANGER, 0))
     if p.act and p.act["kind"] == "leisure":
         specs.append(Spec("stop_leisure", "🏁 Закончить досуг", PRIMARY, 0))
+    if p.act and p.act["kind"] == "study":
+        specs.append(Spec("stop_study", "🏁 Закончить учёбу", PRIMARY, 0))
     specs.append(Spec("freeze", "🧊 Заморозить игру", SECONDARY, 0))
     if p.debt > 0 and p.money > 0:
         specs += [Spec("pay25", "Погасить 25%", SECONDARY, 1), Spec("pay50", "Погасить 50%", SECONDARY, 1),

@@ -95,13 +95,19 @@ SLEEP_CHOICES_HOURS = (1, 2, 4, 6, 8)
 EVENTS_SHOWN = 6                  # сколько событий «пока вас не было» показывать
 
 # ---------- Образование (ступени и курсы) ----------
+# level: вес в генераторе вакансий; hours: сколько часов учёбы до получения;
+# fee: стоимость часа (списывается поминутно); need: что нужно получить заранее
 EDUCATION = {
-    "school": {"title": "Школа", "level": 1},
-    "college": {"title": "Колледж", "level": 2},
-    "higher": {"title": "Высшее образование", "level": 3},
-    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0},
-    "course_med": {"title": "Курс «Медицина»", "level": 0},
+    "school": {"title": "Школа", "level": 1, "hours": 24, "fee": 20, "need": ()},
+    "college": {"title": "Колледж", "level": 2, "hours": 48, "fee": 45, "need": ("school",)},
+    "higher": {"title": "Высшее образование", "level": 3, "hours": 96, "fee": 90, "need": ("college",)},
+    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 16, "fee": 50, "need": ("school",)},
+    "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 24, "fee": 110, "need": ("college",)},
 }
+EDU_SESSION_HOURS = (1, 2, 4)     # длительность одного занятия на выбор
+EDU_MIN_ENERGY = 25.0             # меньше энергии - на занятие не прийти
+EDU_ENERGY_RATE = -3.0            # энергия в час во время учёбы
+EDU_HAPPY_RATE = -0.3             # счастье в час во время учёбы
 
 # ---------- Профессии ----------
 PROFESSIONS = {
@@ -120,7 +126,7 @@ PROFESSIONS = {
     "clerk": {"title": "Офисный клерк", "edu": ("college",), "min_rep": 25, "kinds": ("perm",), "wage": 62,
               "shift": (4, 8), "energy": -3.5, "health": -0.3, "happy": -0.5,
               "commute": (25, 50), "fare": 10, "off": (2, 2), "weekend": True},
-    "accountant": {"title": "Бухгалтер", "edu": ("college", "course_acc"), "min_rep": 40, "kinds": ("perm",),
+    "accountant": {"title": "Бухгалтер", "edu": ("college", "course_acc"), "min_rep": 40, "kinds": ("once", "perm"),
                    "wage": 85, "shift": (4, 8), "energy": -3.5, "health": -0.3, "happy": -0.7,
                    "commute": (25, 50), "fare": 10, "off": (2, 2), "weekend": True},
     "engineer": {"title": "Инженер", "edu": ("higher",), "min_rep": 55, "kinds": ("perm",), "wage": 120,
