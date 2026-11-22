@@ -37,25 +37,25 @@ def dur(minutes: int) -> str:
 def title_of(prof) -> str:
     return R.PROFESSIONS.get(prof, {}).get("title", "работа")
 
-def exp_text(p, compact: bool = False) -> str:
-    """Опыт во всех профессиях, где игрок уже работал."""
+def exp_text(p) -> str:
+    """Опыт во всех профессиях, где игрок уже работал. Пусто, если не работал нигде."""
     items = []
     for prof, hours in p.exp.items():
         if hours <= 0 or prof not in R.PROFESSIONS:
             continue
         lvl, left = L.exp_progress(hours)
         item = f"{title_of(prof)} — ур. {lvl}"
-        if not compact and left is not None:
+        if left is not None:
             item += f" (до следующего: {left:.1f} ч)".replace(".", ",")
         items.append(item)
     if not items:
         return ""
-    return "🛠 **Опыт:** " + (", " if compact else "; ").join(items)
+    return "🛠 **Опыт:** " + "; ".join(items)
 
 def buff_desc(kind: str, power: float) -> str:
     pct = f"{power * 100:.0f}%"
     return {"stamina": f"−{pct} к расходу энергии",
-            "learning": f"+{pct} к скорости набора опыта в профессии",
+            "learning": f"+{pct} к скорости набора опыта в профессии и прогресса учёбы",
             "recovery": f"+{pct} к восстановлению энергии и здоровья"}[kind]
 
 def effect_text(item: dict) -> str:
@@ -322,9 +322,6 @@ def jobs_text(p, vacs: list, now: datetime, tz) -> str:
             "Список общий для сервера: кто успел, тому и работа. Сверху самые свежие. "
             f"Следующее обновление {ts(M.next_window(now, tz))}.\n"
             "🟢 доступна вам · 🔒 пока недоступна (причина внутри карточки)")
-    et = exp_text(p, compact=True)
-    if et:
-        head += "\n" + et
     if not vacs:
         return head + "\n\nСейчас вакансий нет: загляните после обновления."
     return head + "\n\n" + "\n".join(vacancy_line(p, v) for v in vacs)

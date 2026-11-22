@@ -98,11 +98,11 @@ EVENTS_SHOWN = 6                  # сколько событий «пока в�
 # level: вес в генераторе вакансий; hours: сколько часов учёбы до получения;
 # fee: стоимость часа (списывается поминутно); need: что нужно получить заранее
 EDUCATION = {
-    "school": {"title": "Школа", "level": 1, "hours": 12, "fee": 20, "need": ()},
-    "college": {"title": "Колледж", "level": 2, "hours": 18, "fee": 45, "need": ("school",)},
-    "higher": {"title": "Высшее образование", "level": 3, "hours": 48, "fee": 90, "need": ("college",)},
-    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 12, "fee": 50, "need": ("school",)},
-    "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 18, "fee": 110, "need": ("college",)},
+    "school": {"title": "Школа", "level": 1, "hours": 18, "fee": 25, "need": ()},
+    "college": {"title": "Колледж", "level": 2, "hours": 36, "fee": 50, "need": ("school",)},
+    "higher": {"title": "Высшее образование", "level": 3, "hours": 48, "fee": 100, "need": ("college",)},
+    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 18, "fee": 65, "need": ("school",)},
+    "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 24, "fee": 125, "need": ("college",)},
 }
 EDU_SESSION_HOURS = (1, 2, 4)     # длительность одного занятия на выбор
 EDU_MIN_ENERGY = 25.0             # меньше энергии - на занятие не прийти

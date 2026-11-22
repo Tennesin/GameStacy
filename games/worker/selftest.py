@@ -566,6 +566,22 @@ def test_education():
     # снимок
     p.edu_progress = {"school": 120}
     assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
+
+    # бафф «Концентрация» ускоряет учёбу, а выпуск обрывает занятие
+    b = L.new_player(7, T0)
+    b.money = 5000
+    b.buffs = {"learning": {"code": "learning_3", "power": 0.35, "left": 10 ** 6}}
+    assert L.start_study(b, "school", 2)[0]
+    L.catch_up(b, at(1), TZ)
+    assert 80 <= b.edu_progress["school"] <= 81, b.edu_progress              # 60 мин × 1.35
+    c = L.new_player(8, T0)
+    c.money = 5000
+    c.buffs = {"learning": {"code": "learning_3", "power": 0.35, "left": 10 ** 6}}
+    c.edu_progress["school"] = R.EDUCATION["school"]["hours"] * 60 - 30
+    assert L.start_study(c, "school", 4)[0]
+    ev = L.catch_up(c, at(3), TZ)
+    assert "edu_done" in kinds(ev) and "school" in c.education and c.act is None
+    assert c.money > 5000 - 30                                               # лишнего не списано
     print("образование: OK")
 
 def test_info():

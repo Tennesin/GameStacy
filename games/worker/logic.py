@@ -291,6 +291,8 @@ class Sim:
                 return p.energy >= R.ENERGY_FORCED_WAKE
             if p.energy >= 100.0:
                 return True
+        if act.get("study") and act["study"] in p.education:
+            return True
         return act.get("quanta") is not None and act["quanta"] <= 0
 
     def _study_tick(self, act: dict):
@@ -302,8 +304,12 @@ class Sim:
             act["fee_f"] -= whole
             p.money -= min(whole, p.money)
         code = act["study"]
-        p.edu_progress[code] = p.edu_progress.get(code, 0) + R.QUANTUM_MINUTES
-        if p.edu_progress[code] >= R.EDUCATION[code]["hours"] * 60 and code not in p.education:
+        act["prog_f"] = act.get("prog_f", 0.0) + R.QUANTUM_MINUTES * (1.0 + buff_power(p, "learning"))
+        gained = int(act["prog_f"])
+        if gained:
+            act["prog_f"] -= gained
+            p.edu_progress[code] = p.edu_progress.get(code, 0) + gained
+        if p.edu_progress.get(code, 0) >= R.EDUCATION[code]["hours"] * 60 and code not in p.education:
             p.education.append(code)
             self.emit("edu_done", edu=code)
 
