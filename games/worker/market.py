@@ -119,3 +119,14 @@ def ensure_market(store, now: datetime, tz: tzinfo, rng: random.Random) -> bool:
             + [generate("perm", wts, nts, rng) for _ in range(n_perm)])
     store.refresh_market(wts, nts, rows)
     return True
+
+def force_refresh(store, now: datetime, tz: tzinfo, rng: random.Random, clear: bool = False) -> tuple:
+    """Принудительное обновление рынка (консоль)."""
+    wts = int(window_start(now, tz).timestamp())
+    nts = int(now.timestamp())
+    a_once, a_perm = (0, 0) if clear else store.count_alive(nts)
+    n_once, n_perm = plan_refresh(a_once, a_perm, rng)
+    rows = ([generate("once", wts, nts, rng) for _ in range(n_once)]
+            + [generate("perm", wts, nts, rng) for _ in range(n_perm)])
+    store.refresh_market(wts, nts, rows, clear=clear)
+    return n_once, n_perm

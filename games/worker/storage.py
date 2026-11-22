@@ -123,10 +123,12 @@ class GuildStorage:
         got = {r["kind"]: r["n"] for r in rows}
         return got.get("once", 0), got.get("perm", 0)
 
-    def refresh_market(self, window_ts: int, now_ts: int, rows: list):
+    def refresh_market(self, window_ts: int, now_ts: int, rows: list, clear: bool = False):
         """Одна транзакция: уборка старых, новые вакансии и отметка «последнее окно»."""
         marks = ", ".join(f":{c}" for c in _VAC_COLS)
         with self.con:
+            if clear:
+                self.con.execute("DELETE FROM vacancies WHERE taken_by IS NULL")
             self.con.execute(
                 "DELETE FROM vacancies WHERE expires_ts<? OR (taken_by IS NOT NULL AND taken_ts<?)",
                 (now_ts - _KEEP_SECONDS, now_ts - _KEEP_SECONDS))
