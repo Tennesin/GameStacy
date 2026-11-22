@@ -1,4 +1,5 @@
 """Самопроверка движка симулятора рабочего. Запуск из корня проекта:  python -m games.worker.selftest"""
+import math
 import json
 import random
 import tempfile
@@ -81,8 +82,12 @@ def test_daily_and_debt():
 
     p = L.new_player(2, start)
     p.money = 0
+    cost = L.daily_cost(p)
     L.catch_up(p, start + timedelta(hours=50), TZ)       # три полуночи
-    assert p.debt == 546 and p.debt_pressure == 2, (p.debt, p.debt_pressure)
+    expected = cost                                      # 1-я полночь: долга ещё нет, процентов нет
+    for _ in range(2):                                   # 2-я и 3-я: проценты на старый долг, затем платёж
+        expected += math.ceil(expected * R.DEBT_RATE) + cost
+    assert p.debt == expected and p.debt_pressure == 2, (p.debt, expected, p.debt_pressure)
     p.money = 500
     assert L.pay_debt(p, 100) == 100
     assert p.debt_paid_today and p.debt_pressure == 0

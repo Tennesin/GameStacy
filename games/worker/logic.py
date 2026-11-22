@@ -704,6 +704,8 @@ def can_take(p: Player, vac, now_ts: int) -> tuple:
         return True, ""
     if p.act is not None or p.queue:
         return False, "Сейчас вы заняты."
+    if p.venue:
+        return False, "Сначала выйдите из магазина."
     if career_blocked(p):
         return False, f"Здоровье ниже {R.HEALTH_CAREER_BLOCK:.0f}%: карьера заблокирована."
     if p.energy < R.MIN_START_ENERGY:
