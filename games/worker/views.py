@@ -48,6 +48,9 @@ ALL_SPECS = [
     Spec("course_go", "Выберите курс", None, 4, "select"),
     Spec("house_go", "Куда переехать?", None, 4, "select"),
     Spec("edu_go", "Чему учиться?", None, 4, "select"),
+    Spec("kitchen", "🍳 Кухня", PRIMARY, 0),
+    Spec("buy_qty", "Сколько продуктов?", None, 4, "select"),
+    Spec("cook_go", "Что приготовить?", None, 4, "select"),
 ]
 
 def sleep_opts(p) -> list:
@@ -65,9 +68,34 @@ def sleep_opts(p) -> list:
 def venue_opts(p) -> list:
     opts = []
     for code, item in L.goods_of(p.venue):
+        price = L.good_price(p.venue, code)
+        if code in R.INGREDIENTS:
+            have = L.held(p, code)
+            desc = (f"уп. {L.amount_text(code, item['pack'])} · "
+                    f"у вас: {L.amount_text(code, have) if have else 'нет'}")
+            opts.append((f"{item['title']} · {price} м."[:100], code, desc[:100]))
+            continue
         left = max(0, L.good_limit(code) - p.day_buys.get(code, 0))
-        opts.append((f"{item['title']} · {L.good_price(p.venue, code)} м."[:100],
+        opts.append((f"{item['title']} · {price} м."[:100],
                      code, f"{T.effect_text(item)} · осталось {left}"[:100]))
+    return opts
+
+def qty_opts() -> list:
+    return [("1 упаковка (яйца: 6 шт.)", "1", "Для продуктов: одна упаковка"),
+            ("2 упаковки (яйца: 12 шт.)", "2", "Для продуктов: две упаковки"),
+            ("Максимум в слот", "max", "Докупить столько, сколько влезет в слот")]
+
+def cook_opts(p) -> list:
+    opts = []
+    for code, r in R.RECIPES.items():
+        plan = L.cook_plan(p, code)
+        miss = L.missing_ingredients(p, code)
+        if miss:
+            desc = "не хватает: " + ", ".join(miss)
+        else:
+            desc = f"⚡+{plan['energy']:.1f} 😊+{plan['happy']:.1f} · опыт +{plan['xp']:.1f}"
+        opts.append((f"{'❌ ' if miss else ''}{r['title']} · {plan['quanta'] * R.QUANTUM_MINUTES} мин"[:100],
+                     code, desc[:100]))
     return opts
 
 def ent_opts(p) -> list:
@@ -125,16 +153,21 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return [Spec("quit_yes", "✅ Да, уволиться", DANGER, 0), Spec("myjob", "Отмена", SECONDARY, 0)]
     if screen == "leisure":
         return [Spec("market", "🛒 Рынок", PRIMARY, 0), Spec("ent", "🎭 Развлечения", PRIMARY, 0),
-                Spec("nav_hosp", "🏥 Больница", PRIMARY, 0), Spec("housing", "🏠 Жильё", PRIMARY, 0),
-                Spec("menu", "◀ Назад", SECONDARY, 1)]
+                Spec("kitchen", "🍳 Кухня", PRIMARY, 0), Spec("nav_hosp", "🏥 Больница", PRIMARY, 0),
+                Spec("housing", "🏠 Жильё", PRIMARY, 0), Spec("menu", "◀ Назад", SECONDARY, 1)]
     if screen == "market":
         return [Spec("go_food", "🥖 Продукты", PRIMARY, 0), Spec("go_pharm", "💊 Аптека", PRIMARY, 0),
                 Spec("go_super", "🛍 Супермаркет", PRIMARY, 0), Spec("leisure", "◀ Назад", SECONDARY, 1)]
     if screen == "venue" and p is not None and p.venue:
-        return [Spec("buy", "Что купить?", None, 0, "select", venue_opts(p)),
-                Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 1)]
+        specs = [Spec("buy", "Что купить?", None, 0, "select", venue_opts(p))]
+        if "ingr" in R.VENUES[p.venue]["cats"]:
+            specs.append(Spec("buy_qty", "Сколько продуктов?", None, 1, "select", qty_opts()))
+        return specs + [Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 2)]
     if screen == "ent":
         return [Spec("ent_go", "Куда пойти?", None, 0, "select", ent_opts(p)),
+                Spec("leisure", "◀ Назад", SECONDARY, 1)]
+    if screen == "kitchen":
+        return [Spec("cook_go", "Что приготовить?", None, 0, "select", cook_opts(p)),
                 Spec("leisure", "◀ Назад", SECONDARY, 1)]
     if screen == "hospital":
         return [Spec("course_go", "Выберите курс", None, 0, "select", course_opts()),

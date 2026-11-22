@@ -584,6 +584,60 @@ def test_education():
     assert c.money > 5000 - 30                                               # лишнего не списано
     print("образование: OK")
 
+def test_kitchen():
+    assert L.cook_level(0) == 0 and L.cook_level(11.9) == 0 and L.cook_level(12) == 1
+    assert L.cook_level(10 ** 6) == R.COOK_MAX_LEVEL
+
+    # покупка: сумка, слоты, лимиты слота
+    p = L.new_player(1, T0)
+    p.money, p.venue = 1000, "food"
+    assert L.buy(p, "eggs")[0] and p.bag == {"eggs": 6} and p.money == 1000 - 48
+    p.buy_qty = "max"
+    assert L.buy(p, "potato")[0] and p.bag["potato"] == 5000
+    assert not L.buy(p, "potato")[0]                                  # слот полон
+    p.buy_qty = "1"
+    for code in ("onion", "carrot", "cabbage", "tomato", "oil", "flour", "milk", "rice"):
+        assert L.buy(p, code)[0], code
+    assert not L.buy(p, "chicken")[0]                                 # нет свободных слотов
+    assert L.buy(p, "eggs")[0] and p.bag["eggs"] == 12                # в существующий слот можно
+    assert not L.buy(p, "eggs")[0]
+    assert p.fridge == {}                                             # дома ещё нет
+    assert L.leave_venue(p)[0]
+    ev = L.catch_up(p, at(0.3), TZ)
+    assert "bag_home" in kinds(ev) and p.bag == {} and p.fridge["potato"] == 5000 and p.fridge["eggs"] == 12
+
+    # готовка: списание, освобождение слотов, результат
+    q = L.new_player(2, T0)
+    q.fridge = {"eggs": 2, "tomato": 100, "oil": 10}
+    q.energy, q.happiness = 50.0, 40.0
+    assert L.start_cook(q, "fried_eggs")[0] and q.fridge == {}        # слоты освободились
+    assert not L.start_cook(q, "omelet")[0]                           # занят
+    ev = L.catch_up(q, at(0.5), TZ)
+    assert "cooked" in kinds(ev) and q.cook_xp == 2.0 and q.day_meals == 1
+    assert q.energy > 50 and q.happiness > 40
+    assert not L.start_cook(q, "plov")[0]                             # нет продуктов
+
+    # убывающая отдача: 4-е блюдо за сутки
+    r = L.new_player(3, T0)
+    r.fridge, r.day_meals = {"eggs": 2, "tomato": 100, "oil": 10}, 3
+    assert L.start_cook(r, "fried_eggs")[0]
+    assert r.act["cook"]["energy"] == 0.8 and r.act["cook"]["xp"] == 0.8
+
+    # больница обрывает готовку: продукты пропали
+    s = L.new_player(4, T0)
+    s.fridge = {"rice": 300, "chicken": 400, "carrot": 200, "onion": 150, "oil": 60}
+    assert L.start_cook(s, "plov")[0]
+    s.health = 4.0
+    ks = kinds(L.catch_up(s, at(0.2), TZ))
+    assert "cook_lost" in ks and "hospital" in ks and s.cook_xp == 0 and s.fridge == {}
+
+    # полночь сбрасывает счётчик блюд; снимок
+    q.day_meals = 5
+    L.catch_up(q, at(16), TZ)
+    assert q.day_meals == 0
+    assert L.Player.restore(json.loads(json.dumps(q.snapshot()))).snapshot() == q.snapshot()
+    print("продукты и готовка: OK")
+
 def test_info():
     from .info import PAGE_LIMIT, build_pages
     for key, _title, text in build_pages():
@@ -613,6 +667,7 @@ def main():
     test_snapshot_stage2()
     test_permanent()
     test_education()
+    test_kitchen()
     test_info()
     print("Все проверки пройдены.")
 

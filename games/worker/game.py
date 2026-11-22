@@ -147,12 +147,12 @@ class WorkerController:
             return "status", "Игра заморожена: сначала разморозьте её.", False
 
         # В магазине можно только покупать и уходить
-        if p.venue and action not in ("status", "refresh", "buy", "venue_leave"):
+        if p.venue and action not in ("status", "refresh", "buy", "buy_qty", "venue_leave"):
             if action in ("market", "menu", "leisure", "menu_refresh"):
                 return "venue", "", True
             return "venue", "Сначала выйдите из магазина.", False
 
-        if action in ("menu", "career", "leisure", "market", "ent", "housing", "edu"):
+        if action in ("menu", "career", "leisure", "market", "ent", "housing", "edu", "kitchen"):
             return action, "", True
         if action == "nav_hosp":
             return "hospital", "", True
@@ -168,6 +168,9 @@ class WorkerController:
         if action == "buy":
             ok, msg = L.buy(p, value or "")
             return ("venue" if p.venue else "status"), msg, ok
+        if action == "buy_qty":
+            p.buy_qty = value if value in ("1", "2", "max") else "1"
+            return "venue", "", True
         if action == "venue_leave":
             ok, msg = L.leave_venue(p)
             return "status", msg, ok
@@ -186,6 +189,9 @@ class WorkerController:
         if action == "course_go":
             ok, msg = L.start_course(p, value or "")
             return ("status" if ok else "hospital"), msg, ok
+        if action == "cook_go":
+            ok, msg = L.start_cook(p, value or "")
+            return ("status" if ok else "kitchen"), msg, ok
         if action == "house_go":
             ok, msg = L.move_housing(p, value or "", now, TZ)
             return ("status" if ok else "housing"), msg, ok

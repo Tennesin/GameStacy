@@ -184,9 +184,9 @@ ERRAND_ENERGY_RATE = -3.0         # энергия в час на дороге �
 DEFAULT_DAILY_LIMIT = 6           # покупок одного товара за игровые сутки (если у товара нет своего лимита)
 # cats: какие категории товаров продаёт площадка; markup: наценка
 VENUES = {
-    "food": {"title": "Продукты", "emoji": "🥖", "cats": ("food",), "markup": 1.0},
+    "food": {"title": "Продукты", "emoji": "🥖", "cats": ("food", "ingr"), "markup": 1.0},
     "pharm": {"title": "Аптека", "emoji": "💊", "cats": ("pharm",), "markup": 1.0},
-    "super": {"title": "Супермаркет", "emoji": "🛍", "cats": ("food", "pharm"), "markup": 1.10},
+    "super": {"title": "Супермаркет", "emoji": "🛍", "cats": ("food", "pharm", "ingr"), "markup": 1.10},
 }
 # energy / health / happy: мгновенное изменение показателя; limit: покупок за сутки
 GOODS = {
@@ -231,3 +231,50 @@ COURSES = {
 }
 COURSE_ENERGY_RATE = -2.0         # энергия в час во время занятия
 COURSE_MIN_ENERGY = 25.0          # меньше энергии - на курс не пойти
+
+
+# ---------- Продукты, холодильник, готовка ----------
+FRIDGE_SLOTS = 10                 # слотов в холодильнике: один слот = один вид продукта
+# unit: g / ml / pcs (хранится целым числом); pack: сколько в одной упаковке; price: цена упаковки;
+# slot: сколько этого продукта помещается в один слот
+INGREDIENTS = {
+    "potato": {"title": "Картошка", "cat": "ingr", "unit": "g", "pack": 1000, "price": 18, "slot": 5000},
+    "onion": {"title": "Лук", "cat": "ingr", "unit": "g", "pack": 1000, "price": 14, "slot": 3000},
+    "carrot": {"title": "Морковь", "cat": "ingr", "unit": "g", "pack": 1000, "price": 16, "slot": 3000},
+    "cabbage": {"title": "Капуста", "cat": "ingr", "unit": "g", "pack": 1000, "price": 12, "slot": 3000},
+    "tomato": {"title": "Помидоры", "cat": "ingr", "unit": "g", "pack": 1000, "price": 35, "slot": 2000},
+    "oil": {"title": "Масло", "cat": "ingr", "unit": "ml", "pack": 1000, "price": 95, "slot": 2000},
+    "flour": {"title": "Мука", "cat": "ingr", "unit": "g", "pack": 1000, "price": 28, "slot": 3000},
+    "eggs": {"title": "Яйца", "cat": "ingr", "unit": "pcs", "pack": 6, "price": 48, "slot": 12},
+    "milk": {"title": "Молоко", "cat": "ingr", "unit": "ml", "pack": 1000, "price": 40, "slot": 2000},
+    "rice": {"title": "Рис", "cat": "ingr", "unit": "g", "pack": 1000, "price": 45, "slot": 3000},
+    "chicken": {"title": "Курица", "cat": "ingr", "unit": "g", "pack": 1000, "price": 160, "slot": 2000},
+    "sugar": {"title": "Сахар", "cat": "ingr", "unit": "g", "pack": 1000, "price": 40, "slot": 2000},
+}
+# minutes: время на 0 уровне повара; items: сколько чего нужно; energy/happy: эффект на 0 уровне; xp: опыт Повара
+RECIPES = {
+    "fried_eggs": {"title": "Яичница с помидорами", "minutes": 5, "energy": 4, "happy": 2, "xp": 2,
+                   "items": {"eggs": 2, "tomato": 100, "oil": 10}},
+    "omelet": {"title": "Омлет", "minutes": 10, "energy": 6, "happy": 3, "xp": 3,
+               "items": {"eggs": 3, "milk": 100, "oil": 10}},
+    "fried_potato": {"title": "Жареная картошка с луком", "minutes": 25, "energy": 10, "happy": 4, "xp": 4,
+                     "items": {"potato": 400, "onion": 100, "oil": 30}},
+    "pancakes": {"title": "Блины", "minutes": 35, "energy": 9, "happy": 9, "xp": 5,
+                 "items": {"flour": 250, "milk": 400, "eggs": 2, "sugar": 30, "oil": 20}},
+    "shchi": {"title": "Щи с курицей", "minutes": 50, "energy": 15, "happy": 6, "xp": 6,
+              "items": {"chicken": 200, "cabbage": 300, "potato": 300, "carrot": 100, "onion": 100, "oil": 10}},
+    "plov": {"title": "Плов", "minutes": 75, "energy": 25, "happy": 12, "xp": 8,
+             "items": {"rice": 300, "chicken": 400, "carrot": 200, "onion": 150, "oil": 60}},
+}
+COOK_MIN_ENERGY = 20.0            # меньше энергии - готовить нельзя
+COOK_ENERGY_RATE = -1.5           # энергия в час во время готовки
+# Опыт Повара: уровень N требует BASE + STEP * N опыта
+COOK_MAX_LEVEL = 20
+COOK_XP_BASE = 8.0
+COOK_XP_STEP = 4.0
+# Каждый уровень: быстрее готовка и сильнее эффект еды
+COOK_TIME_STEP = 0.015            # -1.5% времени за уровень (минимум один квант)
+COOK_BOOST_STEP = 0.02            # +2% к энергии и счастью за уровень
+# Убывающая отдача за игровые сутки по числу уже приготовленных блюд: (до какого номера блюда, множитель)
+COOK_EFFECT_TIERS = ((2, 1.0), (3, 0.5), (None, 0.2))    # на эффект: 1-2 блюда полностью, 3-е вдвое меньше
+COOK_XP_TIERS = ((3, 1.0), (5, 0.4), (None, 0.1))        # на опыт: 1-3 полностью, 4-5 по 40%, дальше 10%

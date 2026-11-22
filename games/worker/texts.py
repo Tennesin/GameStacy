@@ -138,6 +138,17 @@ def describe(ev) -> str:
     if k == "edu_done":
         e = R.EDUCATION.get(d["edu"])
         return f"🎓 Получено: {e['title'] if e else d['edu']}! Теперь вам доступны новые вакансии"
+    if k == "cooked":
+        r = R.RECIPES.get(d["dish"])
+        return (f"🍳 Приготовлено и съедено: {r['title'] if r else d['dish']}. "
+                f"Энергия +{d['energy']:.1f}, счастье +{d['happy']:.1f}, опыт Повара +{d['xp']:.1f}")
+    if k == "cook_level":
+        return f"🆙 Опыт Повара: уровень {d['level']}! Готовка быстрее, еда сытнее и приятнее"
+    if k == "cook_lost":
+        r = R.RECIPES.get(d["dish"])
+        return f"🍳 Готовка сорвана: вас увезли в больницу, продукты для «{r['title'] if r else d['dish']}» пропали"
+    if k == "bag_home":
+        return "🧊 Продукты из сумки убраны в холодильник"
     return None
 
 def activity_text(p) -> str:
@@ -186,6 +197,11 @@ def status_text(p, now: datetime, tz) -> str:
                          "Чем дольше долг не гасится, тем хуже репутация и настроение.")
     lines.append(f"🏠 {h['title']} (счастье тянется к {h['base']:.0f}%) · "
                  f"🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
+    if p.fridge or p.bag:
+        extra = f" · 🛍 в сумке видов: {len(p.bag)}" if p.bag else ""
+        lines.append(f"🧊 Холодильник: {len(p.fridge)} из {R.FRIDGE_SLOTS} слотов{extra}")
+    if p.cook_xp > 0:
+        lines.append(f"👨‍🍳 Повар: уровень {L.cook_level(p.cook_xp)}")
     if p.job:
         lines.append(f"💼 Постоянная работа: {title_of(p.job['prof'])} "
                      f"(прогулов {p.job['absences']} из {R.JOB_FIRE_ABSENCES})")
@@ -231,8 +247,9 @@ def status_text(p, now: datetime, tz) -> str:
 def leisure_text(p) -> str:
     return ("🎭 **Досуг**\n"
             f"💰 {money(p.money)} · ⚡ {p.energy:.0f}% · 😊 {p.happiness:.0f}%\n\n"
-            "🛒 **Рынок**: еда и лекарства (на каждую площадку нужно сходить)\n"
+            "🛒 **Рынок**: еда, лекарства и продукты (на каждую площадку нужно сходить)\n"
             "🎭 **Развлечения**: поднимают счастье, чем дороже, тем лучше\n"
+            "🍳 **Кухня**: готовка из продуктов в холодильнике\n"
             "🏥 **Больница**: добровольные курсы с временными эффектами\n"
             "🏠 **Жильё**: чем дороже, тем выше «планка» счастья")
 
@@ -246,15 +263,29 @@ def market_text(p) -> str:
         lines.append(f"{v['emoji']} **{v['title']}**{extra}: " + ", ".join(names))
     return "\n".join(lines)
 
+QTY_LABELS = {"1": "1 упаковка (яйца: 6 шт.)", "2": "2 упаковки (яйца: 12 шт.)", "max": "максимум в слот"}
+
 def venue_text(p) -> str:
     v = R.VENUES[p.venue]
     lines = [f"{v['emoji']} **{v['title']}**", f"💰 У вас {money(p.money)}.", ""]
     if v["markup"] > 1:
         lines += [f"Здесь всё дороже на {round((v['markup'] - 1) * 100)}%, зато есть и еда, и лекарства.", ""]
     for code, item in L.goods_of(p.venue):
-        left = L.good_limit(code) - p.day_buys.get(code, 0)
-        lines.append(f"• **{item['title']}** — {money(L.good_price(p.venue, code))} · "
-                     f"{effect_text(item)} · сегодня осталось: {max(0, left)}")
+        price = money(L.good_price(p.venue, code))
+        if code in R.INGREDIENTS:
+            lines.append(f"• **{item['title']}** — {price} за {L.amount_text(code, item['pack'])} · "
+                         f"слот до {L.amount_text(code, item['slot'])}")
+        else:
+            left = L.good_limit(code) - p.day_buys.get(code, 0)
+            lines.append(f"• **{item['title']}** — {price} · {effect_text(item)} · "
+                         f"сегодня осталось: {max(0, left)}")
+    if "ingr" in v["cats"]:
+        used = len(set(p.fridge) | set(p.bag))
+        lines += ["", f"🧺 Продукты не съедаются: они едут с вами в сумке и ложатся в холодильник дома "
+                      f"(слотов занято {used} из {R.FRIDGE_SLOTS}). Берём: **{QTY_LABELS[p.buy_qty]}**."]
+        if p.bag:
+            lines.append("🛍 В сумке: " + ", ".join(
+                f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}" for c, n in p.bag.items()))
     lines += ["", "Выберите товар в списке. Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
     return "\n".join(lines)
 
@@ -290,6 +321,37 @@ def hospital_text(p) -> str:
                 lines.append(f"• {c['title']} — {money(c['cost'])}: {buff_desc(kind, c['power'])}, "
                              f"{c['hours']} ч, занятие {c['lesson']} ч")
     lines += ["", "Один эффект каждого вида: более сильный заменяет слабый, тот же курс продлевает срок."]
+    return "\n".join(lines)
+
+def fridge_text(p) -> str:
+    items = [f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}"
+             for c, n in p.fridge.items() if c in R.INGREDIENTS]
+    head = f"🧊 **Холодильник** ({len(p.fridge)} из {R.FRIDGE_SLOTS} слотов): "
+    return head + ("; ".join(items) if items else "пусто")
+
+def kitchen_text(p) -> str:
+    lvl, left = L.cook_progress(p.cook_xp)
+    pk = L.cook_perks(lvl)
+    em = L.tier_mult(R.COOK_EFFECT_TIERS, p.day_meals)
+    xm = L.tier_mult(R.COOK_XP_TIERS, p.day_meals)
+    lvl_line = f"👨‍🍳 **Повар:** уровень {lvl} из {R.COOK_MAX_LEVEL}"
+    if left is not None:
+        lvl_line += f" (до следующего: {left:.1f} опыта)".replace(".", ",")
+    lines = ["🍳 **Кухня**", lvl_line,
+             f"Время готовки ×{pk['time']:.2f}, сытность и радость ×{pk['boost']:.2f}",
+             fridge_text(p),
+             f"Блюд приготовлено сегодня: {p.day_meals}. Следующее даст {em * 100:.0f}% эффекта "
+             f"и {xm * 100:.0f}% опыта.", ""]
+    for code, r in R.RECIPES.items():
+        plan = L.cook_plan(p, code)
+        mark = "❌" if L.missing_ingredients(p, code) else "✅"
+        need = ", ".join(f"{R.INGREDIENTS[i]['title'].lower()} {L.amount_text(i, n)}"
+                         for i, n in r["items"].items())
+        lines.append(f"{mark} **{r['title']}** — {plan['quanta'] * R.QUANTUM_MINUTES} мин · "
+                     f"⚡+{plan['energy']:.0f} 😊+{plan['happy']:.0f} · {need}")
+    lines += ["", f"Готовить можно дома, когда вы свободны (энергия не ниже {R.COOK_MIN_ENERGY:.0f}%). "
+                  "Прервать готовку нельзя; сорвать её может только больница (продукты пропадут). "
+                  "Блюдо съедается сразу."]
     return "\n".join(lines)
 
 def housing_text(p, now: datetime, tz) -> str:
@@ -453,6 +515,8 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = venue_text(p)
     elif screen == "ent":
         text = ent_text(p)
+    elif screen == "kitchen":
+        text = kitchen_text(p)
     elif screen == "hospital":
         text = hospital_text(p)
     elif screen == "housing":

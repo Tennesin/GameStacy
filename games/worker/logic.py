@@ -102,6 +102,11 @@ class Player:
     day_ent: dict = field(default_factory=dict)     # занятие -> квантов за игровые сутки
     job: Optional[dict] = None              # договор постоянной работы (параметры заморожены на момент найма)
     job_cooldown: Optional[datetime] = None # до какого момента нельзя нанять новую постоянную
+    fridge: dict = field(default_factory=dict)      # продукт -> количество (г / мл / шт.), слот = вид
+    bag: dict = field(default_factory=dict)         # купленное, но ещё не доехавшее до дома
+    cook_xp: float = 0.0                            # опыт Повара
+    day_meals: int = 0                              # блюд, приготовленных за игровые сутки
+    buy_qty: str = "1"                              # сколько продуктов брать: "1" / "2" / "max"
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -119,6 +124,8 @@ class Player:
             "venue": self.venue, "buffs": copy.deepcopy(self.buffs), "last_move": iso(self.last_move),
             "day_buys": dict(self.day_buys), "day_ent": dict(self.day_ent),
             "job": copy.deepcopy(self.job), "job_cooldown": iso(self.job_cooldown),
+            "fridge": dict(self.fridge), "bag": dict(self.bag), "cook_xp": self.cook_xp,
+            "day_meals": self.day_meals, "buy_qty": self.buy_qty,
         }
 
     @classmethod
@@ -149,6 +156,11 @@ class Player:
         p.day_ent = {str(k): int(v) for k, v in (d.get("day_ent") or {}).items()}
         p.job = copy.deepcopy(d.get("job"))
         p.job_cooldown = dt(d.get("job_cooldown"))
+        p.fridge = {str(k): int(v) for k, v in (d.get("fridge") or {}).items()}
+        p.bag = {str(k): int(v) for k, v in (d.get("bag") or {}).items()}
+        p.cook_xp = float(d.get("cook_xp", 0.0))
+        p.day_meals = int(d.get("day_meals", 0))
+        p.buy_qty = d.get("buy_qty", "1") if d.get("buy_qty") in ("1", "2", "max") else "1"
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -321,6 +333,7 @@ class Sim:
         p.act = p.queue.pop(0) if p.queue else None
         if p.act is None and p.energy < R.ENERGY_FORCED:
             p.venue = None
+            self._unload_bag()
             p.act = {"kind": "sleep", "forced": True, "quanta": None, "done_q": 0}
             self._excuse()                                 # принудительный сон - уважительная причина
             self.emit("forced_sleep")
@@ -339,9 +352,36 @@ class Sim:
         if act.get("course"):                              # курс закончен: включаем бафф
             apply_buff(p, act["course"])
             data["course"] = act["course"]
+        if act.get("cook"):                                # блюдо готово: съедается сразу
+            self._cook_done(act["cook"])
+        if act["kind"] == "errand" and not act.get("arrive"):    # дорога домой: сумка в холодильник
+            self._unload_bag()
         self.emit("finished", **data)
         p.act = None
         self._next()
+
+    def _cook_done(self, c: dict):
+        """Результат блюда: энергия, счастье и опыт Повара."""
+        p = self.p
+        before = cook_level(p.cook_xp)
+        p.energy = clamp(p.energy + c["energy"])
+        p.happiness = clamp(p.happiness + c["happy"])
+        p.cook_xp += c["xp"]
+        self.emit("cooked", dish=c["dish"], energy=c["energy"], happy=c["happy"], xp=c["xp"])
+        after = cook_level(p.cook_xp)
+        if after > before:
+            self.emit("cook_level", level=after)
+
+    def _unload_bag(self):
+        """Сумка -> холодильник (игрок дома, в больнице или уснул). Место проверялось при покупке."""
+        p = self.p
+        if not p.bag:
+            return
+        for code, n in p.bag.items():
+            cap = R.INGREDIENTS[code]["slot"] if code in R.INGREDIENTS else n
+            p.fridge[code] = min(cap, p.fridge.get(code, 0) + n)
+        p.bag = {}
+        self.emit("bag_home")
 
     def _interrupt(self, reason: str, why: str):
         """Досрочное завершение (срыв). reason: forced / voluntary."""
@@ -422,6 +462,9 @@ class Sim:
             self._settle(p.act, "forced")
         p.queue = []
         p.venue = None
+        if p.act and p.act.get("cook"):                    # готовка сорвана: продукты уже списаны и пропали
+            self.emit("cook_lost", dish=p.act["cook"]["dish"])
+        self._unload_bag()
         debt = 0
         if p.money >= R.HOSPITAL_FULL_COST:
             cost, hours, health = R.HOSPITAL_FULL_COST, R.HOSPITAL_FULL_HOURS, R.HOSPITAL_FULL_HEALTH
@@ -452,7 +495,7 @@ class Sim:
         else:
             p.debt_pressure = 0
         p.debt_paid_today = False
-        p.day_buys, p.day_ent = {}, {}
+        p.day_buys, p.day_ent, p.day_meals = {}, {}, 0
         # 2. Жильё и питание
         cost = daily_cost(p)
         paid = min(p.money, cost)
@@ -868,12 +911,19 @@ def move_housing(p: Player, code: str, now: datetime, tz: tzinfo) -> tuple:
 
 # ---------- Рынок ----------
 
+def item_of(code: str) -> dict:
+    """Описание товара: мгновенный (GOODS) или продукт (INGREDIENTS)."""
+    return R.GOODS.get(code) or R.INGREDIENTS[code]
+
 def goods_of(venue: str) -> list:
     cats = R.VENUES[venue]["cats"]
-    return [(code, item) for code, item in R.GOODS.items() if item["cat"] in cats]
+    out = [(code, item) for code, item in R.GOODS.items() if item["cat"] in cats]
+    out += [(code, item) for code, item in R.INGREDIENTS.items() if item["cat"] in cats]
+    return out
 
 def good_price(venue: str, code: str) -> int:
-    base = R.GOODS[code]["price"]
+    """Цена товара (у продуктов - за упаковку)."""
+    base = item_of(code)["price"]
     markup = R.VENUES[venue]["markup"]
     price = int(round(base * markup))
     return max(price, base + 1) if markup > 1 else price
@@ -907,6 +957,8 @@ def buy(p: Player, code: str) -> tuple:
     venue = p.venue
     if not venue:
         return False, "Вы не в магазине."
+    if code in R.INGREDIENTS:
+        return _buy_ingredient(p, venue, code)
     item = R.GOODS.get(code)
     if item is None or item["cat"] not in R.VENUES[venue]["cats"]:
         return False, "Здесь такого нет."
@@ -927,6 +979,133 @@ def buy(p: Player, code: str) -> tuple:
     p.happiness = clamp(p.happiness + gain["happiness"])
     p.day_buys[code] = p.day_buys.get(code, 0) + 1
     return True, f"Куплено: {item['title']} за {price} м."
+
+def _buy_ingredient(p: Player, venue: str, code: str) -> tuple:
+    """Продукт: не съедается, а едет в сумку. Количество берётся из p.buy_qty."""
+    ing = R.INGREDIENTS[code]
+    if ing["cat"] not in R.VENUES[venue]["cats"]:
+        return False, "Здесь такого нет."
+    have = held(p, code)
+    if have == 0 and len(set(p.fridge) | set(p.bag)) >= R.FRIDGE_SLOTS:
+        return False, (f"Холодильник полон: заняты все {R.FRIDGE_SLOTS} слотов "
+                       "(вместе с тем, что уже в сумке). Сначала приготовьте что-нибудь.")
+    free = (ing["slot"] - have) // ing["pack"]
+    if free <= 0:
+        return False, f"Слот «{ing['title']}» заполнен: больше {amount_text(code, ing['slot'])} не поместится."
+    mode = p.buy_qty
+    packs = free if mode == "max" else (int(mode) if mode in ("1", "2") else 1)
+    if packs > free:
+        return False, (f"Столько не поместится: в слот войдёт ещё не больше "
+                       f"{amount_text(code, free * ing['pack'])}.")
+    price = good_price(venue, code) * packs
+    if p.money < price:
+        return False, f"Не хватает денег ({price} м.)."
+    p.money -= price
+    got = packs * ing["pack"]
+    p.bag[code] = p.bag.get(code, 0) + got
+    return True, (f"В сумке: {ing['title']} {amount_text(code, got)} за {price} м. "
+                  "В холодильнике это окажется, когда вы вернётесь домой.")
+
+# ---------- Продукты и готовка ----------
+
+def amount_text(code: str, n: int) -> str:
+    """Количество продукта для людей: «1,5 кг», «300 г», «2 л», «12 шт.»."""
+    unit = R.INGREDIENTS[code]["unit"]
+    if unit == "pcs":
+        return f"{n} шт."
+    big, small = ("кг", "г") if unit == "g" else ("л", "мл")
+    if n >= 1000:
+        return f"{n / 1000:g} {big}".replace(".", ",")
+    return f"{n} {small}"
+
+def held(p: Player, code: str) -> int:
+    """Сколько продукта у игрока: холодильник и сумка вместе."""
+    return p.fridge.get(code, 0) + p.bag.get(code, 0)
+
+def tier_mult(tiers: tuple, n: int) -> float:
+    """Множитель убывающей отдачи для блюда с номером n за сутки (с нуля)."""
+    for limit, k in tiers:
+        if limit is None or n < limit:
+            return k
+    return tiers[-1][1]
+
+def cook_level(xp: float) -> int:
+    total, level = 0.0, 0
+    while level < R.COOK_MAX_LEVEL:
+        need = R.COOK_XP_BASE + R.COOK_XP_STEP * (level + 1)
+        if xp + 1e-9 < total + need:
+            break
+        total += need
+        level += 1
+    return level
+
+def cook_progress(xp: float) -> tuple:
+    """(уровень, опыта до следующего уровня). Второе значение None на максимальном уровне."""
+    total, level = 0.0, 0
+    while level < R.COOK_MAX_LEVEL:
+        need = R.COOK_XP_BASE + R.COOK_XP_STEP * (level + 1)
+        if xp + 1e-9 < total + need:
+            return level, total + need - xp
+        total += need
+        level += 1
+    return level, None
+
+def cook_perks(level: int) -> dict:
+    return {"time": 1.0 - R.COOK_TIME_STEP * level, "boost": 1.0 + R.COOK_BOOST_STEP * level}
+
+def cook_plan(p: Player, code: str) -> dict:
+    """Что получится, если начать готовить прямо сейчас (с учётом уровня и убывающей отдачи)."""
+    rec = R.RECIPES[code]
+    pk = cook_perks(cook_level(p.cook_xp))
+    em = tier_mult(R.COOK_EFFECT_TIERS, p.day_meals)
+    xm = tier_mult(R.COOK_XP_TIERS, p.day_meals)
+    quanta = max(1, math.ceil(rec["minutes"] * pk["time"] / R.QUANTUM_MINUTES - 1e-9))
+    return {"quanta": quanta, "energy": round(rec["energy"] * pk["boost"] * em, 2),
+            "happy": round(rec["happy"] * pk["boost"] * em, 2), "xp": round(rec["xp"] * xm, 2),
+            "em": em, "xm": xm}
+
+def missing_ingredients(p: Player, code: str) -> list:
+    """Чего не хватает для блюда: «Лук 100 г»."""
+    out = []
+    for ing, need in R.RECIPES[code]["items"].items():
+        have = p.fridge.get(ing, 0)
+        if have < need:
+            out.append(f"{R.INGREDIENTS[ing]['title']} {amount_text(ing, need - have)}")
+    return out
+
+def can_cook(p: Player, code: str) -> tuple:
+    if code not in R.RECIPES:
+        return False, "Такого блюда нет."
+    why = free_reason(p)
+    if why:
+        return False, why
+    if p.venue:
+        return False, "Сначала выйдите из магазина и вернитесь домой."
+    if p.energy < R.COOK_MIN_ENERGY:
+        return False, f"Слишком мало сил: готовить можно при энергии не ниже {R.COOK_MIN_ENERGY:.0f}%."
+    miss = missing_ingredients(p, code)
+    if miss:
+        return False, "Не хватает продуктов в холодильнике: " + ", ".join(miss) + "."
+    return True, ""
+
+def start_cook(p: Player, code: str) -> tuple:
+    """Продукты списываются сразу; освободившиеся слоты исчезают. Результат применится по окончании."""
+    ok, why = can_cook(p, code)
+    if not ok:
+        return False, why
+    rec = R.RECIPES[code]
+    plan = cook_plan(p, code)
+    for ing, need in rec["items"].items():
+        left = p.fridge[ing] - need
+        if left > 0:
+            p.fridge[ing] = left
+        else:
+            del p.fridge[ing]                              # слот освобождается сразу
+    p.day_meals += 1
+    p.act = {"kind": "cook", "title": f"Готовка: {rec['title']}", "quanta": plan["quanta"], "done_q": 0,
+             "rates": {"energy": R.COOK_ENERGY_RATE},
+             "cook": {"dish": code, "energy": plan["energy"], "happy": plan["happy"], "xp": plan["xp"]}}
+    return True, f"Вы начали готовить: {rec['title']} ({plan['quanta'] * R.QUANTUM_MINUTES} мин)."
 
 # ---------- Развлечения ----------
 
