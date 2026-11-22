@@ -548,6 +548,21 @@ def wake(p: Player, tz: tzinfo) -> tuple:
     sim._finish()
     return True, "Вы проснулись.", sim.events
 
+def sleep_forecast(p: Player, quanta: Optional[int], tz: tzinfo) -> tuple:
+    """Прогноз сна на копии игрока (настоящий игрок не меняется)."""
+    q = Player.restore(p.snapshot())
+    q.money, q.job, q.venue, q.queue = 10 ** 9, None, None, []   # платежи и работа прогноз не искажают
+    e0, h0 = q.energy, q.health
+    q.act = {"kind": "sleep", "forced": False, "quanta": quanta, "done_q": 0}
+    sim = Sim(q, tz)
+    limit = quanta or (24 * 60 // R.QUANTUM_MINUTES) * 3          # потолок для режима «до полного»
+    n = 0
+    while q.act is not None and q.act["kind"] == "sleep" and n < limit:
+        q.updated += QUANTUM
+        sim._step()
+        n += 1
+    return e0, q.energy, h0, q.health, n * R.QUANTUM_MINUTES
+
 def abort_shift(p: Player, tz: tzinfo) -> tuple:
     """Добровольный уход со смены или учёбы (срыв). Возвращает ok, текст, события."""
     act = p.act
@@ -590,6 +605,17 @@ def exp_level(hours: float) -> int:
         total += need
         level += 1
     return level
+
+def exp_progress(hours: float) -> tuple:
+    """(уровень, часов до следующего уровня)."""
+    total, level = 0.0, 0
+    while level < R.EXP_MAX_LEVEL:
+        need = R.EXP_BASE_HOURS + R.EXP_STEP_HOURS * (level + 1)
+        if hours + 1e-9 < total + need:
+            return level, total + need - hours
+        total += need
+        level += 1
+    return level, None
 
 def perks(level: int) -> dict:
     """Бонусы уровня: улучшения идут по кругу (зарплата, негатив, энергия)."""

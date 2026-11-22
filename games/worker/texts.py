@@ -37,6 +37,21 @@ def dur(minutes: int) -> str:
 def title_of(prof) -> str:
     return R.PROFESSIONS.get(prof, {}).get("title", "работа")
 
+def exp_text(p, compact: bool = False) -> str:
+    """Опыт во всех профессиях, где игрок уже работал."""
+    items = []
+    for prof, hours in p.exp.items():
+        if hours <= 0 or prof not in R.PROFESSIONS:
+            continue
+        lvl, left = L.exp_progress(hours)
+        item = f"{title_of(prof)} — ур. {lvl}"
+        if not compact and left is not None:
+            item += f" (до следующего: {left:.1f} ч)".replace(".", ",")
+        items.append(item)
+    if not items:
+        return ""
+    return "🛠 **Опыт:** " + (", " if compact else "; ").join(items)
+
 def buff_desc(kind: str, power: float) -> str:
     pct = f"{power * 100:.0f}%"
     return {"stamina": f"−{pct} к расходу энергии",
@@ -299,7 +314,7 @@ def vacancy_line(p, v) -> str:
     pr = R.PROFESSIONS[v.prof]
     mark = "🔒" if L.lock_reason(p, v) else "🟢"
     kind = "разовая" if v.kind == "once" else "постоянная"
-    return (f"{mark} **№{v.id}** {pr['title']} · {kind} · {dur(v.shift_min)} · "
+    return (f"{mark} **№{v.slot}** {pr['title']} · {kind} · {dur(v.shift_min)} · "
             f"{v.wage:.0f} м./ч · ⏳ <t:{v.expires_ts}:R>")
 
 def jobs_text(p, vacs: list, now: datetime, tz) -> str:
@@ -307,6 +322,9 @@ def jobs_text(p, vacs: list, now: datetime, tz) -> str:
             "Список общий для сервера: кто успел, тому и работа. Сверху самые свежие. "
             f"Следующее обновление {ts(M.next_window(now, tz))}.\n"
             "🟢 доступна вам · 🔒 пока недоступна (причина внутри карточки)")
+    et = exp_text(p, compact=True)
+    if et:
+        head += "\n" + et
     if not vacs:
         return head + "\n\nСейчас вакансий нет: загляните после обновления."
     return head + "\n\n" + "\n".join(vacancy_line(p, v) for v in vacs)
@@ -319,7 +337,7 @@ def job_text(p, v, now: datetime) -> str:
     kind = ("разовая подработка (начинается сразу, вакансия исчезнет с рынка)" if v.kind == "once"
             else "постоянная работа")
     lines = [
-        f"📄 **Вакансия №{v.id}: {pr['title']}**",
+        f"📄 **Вакансия №{v.slot}: {pr['title']}**",
         f"Тип: {kind}",
         f"Смена: {dur(v.shift_min)} · дорога в одну сторону: {dur(v.commute_min)} "
         f"· проезд: {v.fare} м. в каждую сторону",
@@ -460,6 +478,10 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
                 "Недельная премия за текущую неделю сгорит. Вакансия обратно на рынок не вернётся.")
     else:
         text = status_text(p, now, tz)
+    if screen in ("career", "myjob", "edu"):
+        et = exp_text(p)
+        if et:
+            text += "\n\n" + et
     tail = []
     shown = [t for t in (describe(e) for e in events) if t][-R.EVENTS_SHOWN:]
     if shown:

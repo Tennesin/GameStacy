@@ -142,13 +142,13 @@ class WorkerController:
             if action == "unfreeze":
                 ok, msg = L.unfreeze(p, now, TZ)
                 return "status", msg, ok
-            if action in ("status", "refresh", "menu"):
+            if action in ("status", "refresh", "menu", "menu_refresh"):
                 return "status", "", True
             return "status", "Игра заморожена: сначала разморозьте её.", False
 
         # В магазине можно только покупать и уходить
         if p.venue and action not in ("status", "refresh", "buy", "venue_leave"):
-            if action in ("market", "menu", "leisure"):
+            if action in ("market", "menu", "leisure", "menu_refresh"):
                 return "venue", "", True
             return "venue", "Сначала выйдите из магазина.", False
 
@@ -156,6 +156,8 @@ class WorkerController:
             return action, "", True
         if action == "nav_hosp":
             return "hospital", "", True
+        if action == "menu_refresh":
+            return "menu", "", True
         if action in ("status", "refresh"):
             return "status", "", True
 

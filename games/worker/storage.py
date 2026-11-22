@@ -9,6 +9,7 @@ from config import GAMES_DATA_DIR
 from core.db import connect
 from .logic import Player
 from .market import Vacancy
+from . import rules as R
 
 MIGRATIONS = [
     """
@@ -43,17 +44,22 @@ MIGRATIONS = [
     CREATE INDEX ix_vac_alive ON vacancies (taken_by, expires_ts);
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
     """,
+    """
+    ALTER TABLE vacancies ADD COLUMN slot INTEGER NOT NULL DEFAULT 0;
+    DELETE FROM vacancies WHERE taken_by IS NULL;
+    DELETE FROM meta WHERE key='market_window';
+    """,
 ]
 
 _VAC_COLS = ("kind", "prof", "shift_min", "commute_min", "heavy", "wage", "rate_energy", "rate_health",
-             "rate_happy", "fare", "min_rep", "days_off", "appears_ts", "expires_ts")
+             "rate_happy", "fare", "min_rep", "days_off", "appears_ts", "expires_ts", "slot")
 _KEEP_SECONDS = 86400            # взятые и истёкшие вакансии физически удаляются через сутки
 
 def _vac(row) -> Vacancy:
     off = tuple(int(x) for x in row["days_off"].split(",") if x != "")
     return Vacancy(row["id"], row["kind"], row["prof"], row["shift_min"], row["commute_min"], row["heavy"],
                    row["wage"], row["rate_energy"], row["rate_health"], row["rate_happy"], row["fare"],
-                   row["min_rep"], off, row["appears_ts"], row["expires_ts"], row["taken_by"])
+                   row["min_rep"], off, row["appears_ts"], row["expires_ts"], row["taken_by"], row["slot"])
 
 class GuildStorage:
     def __init__(self, path: Path):
@@ -132,8 +138,17 @@ class GuildStorage:
             self.con.execute(
                 "DELETE FROM vacancies WHERE expires_ts<? OR (taken_by IS NOT NULL AND taken_ts<?)",
                 (now_ts - _KEEP_SECONDS, now_ts - _KEEP_SECONDS))
+            used = {r[0] for r in self.con.execute(
+                "SELECT slot FROM vacancies WHERE taken_by IS NULL AND expires_ts>?", (now_ts,))}
+            numbered = []
+            for row in rows:
+                # самый маленький свободный номер; запасной вариант на случай переполнения - следующий за максимумом
+                slot = next((s for s in range(1, R.MARKET_MAX + 1) if s not in used),
+                            max(used, default=0) + 1)
+                used.add(slot)
+                numbered.append({**row, "slot": slot})
             self.con.executemany(
-                f"INSERT INTO vacancies ({', '.join(_VAC_COLS)}) VALUES ({marks})", rows)
+                f"INSERT INTO vacancies ({', '.join(_VAC_COLS)}) VALUES ({marks})", numbered)
             self.con.execute(
                 "INSERT INTO meta VALUES ('market_window', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(window_ts),))

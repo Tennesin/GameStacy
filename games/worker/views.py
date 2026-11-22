@@ -1,9 +1,9 @@
 """Кнопки симулятора рабочего."""
 from contextlib import suppress
 from typing import NamedTuple, Optional
-
 import discord
 
+from config import TZ
 from core.errors import is_expired, report_error
 from . import logic as L
 from . import rules as R
@@ -25,6 +25,7 @@ ALL_SPECS = [
     Spec("career", "💼 Карьера", PRIMARY, 0), Spec("leisure", "🎭 Досуг", PRIMARY, 0),
     Spec("status", "📋 Моё состояние", SECONDARY, 0), Spec("menu", "◀ Назад", SECONDARY, 0),
     Spec("refresh", "🔄 Обновить", SECONDARY, 0),
+    Spec("menu_refresh", "🔄 Обновить", SECONDARY, 1),
     Spec("unfreeze", "🔥 Разморозить", SUCCESS, 1), Spec("wake", "⏰ Проснуться", PRIMARY, 1),
     Spec("nav_sleep", "😴 Спать", PRIMARY, 1), Spec("freeze", "🧊 Заморозить игру", SECONDARY, 1),
     Spec("pay25", "Погасить 25%", SECONDARY, 1),
@@ -49,8 +50,17 @@ ALL_SPECS = [
     Spec("edu_go", "Чему учиться?", None, 4, "select"),
 ]
 
-def sleep_opts() -> list:
-    return [("До полного восстановления", "full", None)] + [(f"{h} ч", str(h), None) for h in R.SLEEP_CHOICES_HOURS]
+def sleep_opts(p) -> list:
+    variants = [("До полного восстановления", "full", None)]
+    variants += [(f"{h} ч", str(h), h * 60 // R.QUANTUM_MINUTES) for h in R.SLEEP_CHOICES_HOURS]
+    opts = []
+    for label, value, quanta in variants:
+        e0, e1, h0, h1, minutes = L.sleep_forecast(p, quanta, TZ)
+        desc = f"⚡ {e0:.0f}% → {e1:.0f}% · ❤️ {h0:.0f}% → {h1:.0f}%"
+        if quanta is None or minutes < quanta * R.QUANTUM_MINUTES:
+            desc += f" · {T.dur(minutes)}"        # выспитесь раньше срока или режим «до полного»
+        opts.append((label, value, desc[:100]))
+    return opts
 
 def venue_opts(p) -> list:
     opts = []
@@ -97,7 +107,8 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
     """Какие элементы показывать на экране."""
     if screen == "menu":
         return [Spec("career", "💼 Карьера", PRIMARY, 0), Spec("leisure", "🎭 Досуг", PRIMARY, 0),
-                Spec("status", "📋 Моё состояние", SECONDARY, 0)]
+                Spec("status", "📋 Моё состояние", SECONDARY, 0),
+                Spec("menu_refresh", "🔄 Обновить", SECONDARY, 1)]
     if screen == "career":
         return [Spec("jobs", "🔨 Работа", PRIMARY, 0), Spec("myjob", "📑 Моя работа", PRIMARY, 0),
                 Spec("edu", "🎓 Образование", PRIMARY, 0), Spec("menu", "◀ Назад", SECONDARY, 0)]
@@ -137,7 +148,7 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
             opts = []
             for v in jobs[:25]:
                 lock = "🔒 " if p is not None and L.lock_reason(p, v) else ""
-                label = f"{lock}№{v.id} {R.PROFESSIONS[v.prof]['title']} · {T.dur(v.shift_min)}"[:100]
+                label = f"{lock}№{v.slot} {R.PROFESSIONS[v.prof]['title']} · {T.dur(v.shift_min)}"[:100]
                 desc = f"{v.wage:.0f} м./ч · дорога {v.commute_min} мин"
                 opts.append((label, str(v.id), desc))
             specs.append(Spec("job_pick", "Выберите вакансию, чтобы открыть подробности", None, 0, "select", opts))
@@ -149,7 +160,7 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
     if screen == "abort_confirm":
         return [Spec("abort_yes", "✅ Да, уйти", DANGER, 0), Spec("status", "Отмена", SECONDARY, 0)]
     if screen == "sleep":
-        return [Spec("sleep", "Сколько спать?", None, 0, "select", sleep_opts()),
+        return [Spec("sleep", "Сколько спать?", None, 0, "select", sleep_opts(p)),
                 Spec("status", "◀ Назад", SECONDARY, 1)]
     if screen == "freeze_confirm":
         return [Spec("freeze_yes", "✅ Да, заморозить", DANGER, 0), Spec("status", "Отмена", SECONDARY, 0)]

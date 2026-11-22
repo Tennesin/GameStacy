@@ -30,6 +30,7 @@ class Vacancy:
     appears_ts: int
     expires_ts: int
     taken_by: Optional[int] = None
+    slot: int = 0             # номер для игроков (1..MARKET_MAX), закреплён за вакансией на всё её время жизни
 
     def alive(self, now_ts: int) -> bool:
         return self.taken_by is None and self.appears_ts <= now_ts < self.expires_ts
