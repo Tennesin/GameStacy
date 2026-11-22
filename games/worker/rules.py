@@ -10,7 +10,7 @@ START_ENERGY = 100.0
 START_HEALTH = 100.0
 START_HAPPINESS = 60.0
 START_REPUTATION = 20.0
-START_MONEY = 400
+START_MONEY = 500
 START_HOUSING = "room"
 START_FOOD = "regular"
 
@@ -39,15 +39,15 @@ HAPPY_MULT_MAX = 1.1              # при 100% (при 50% равен 1.0)
 
 # ---------- Жильё и питание ----------
 HOUSING = {
-    "bunk": {"title": "Койко-место", "rent": 60, "base": 40.0, "sleep": 0.85, "heal": 0.8},
-    "room": {"title": "Комната", "rent": 110, "base": 50.0, "sleep": 1.0, "heal": 1.0},
-    "studio": {"title": "Студия", "rent": 170, "base": 55.0, "sleep": 1.07, "heal": 1.1},
-    "flat": {"title": "Квартира", "rent": 240, "base": 60.0, "sleep": 1.15, "heal": 1.2},
+    "bunk": {"title": "Койко-место", "rent": 50, "base": 40.0, "sleep": 0.85, "heal": 0.8},
+    "room": {"title": "Комната", "rent": 85, "base": 50.0, "sleep": 1.0, "heal": 1.0},
+    "studio": {"title": "Студия", "rent": 140, "base": 55.0, "sleep": 1.07, "heal": 1.1},
+    "flat": {"title": "Квартира", "rent": 210, "base": 60.0, "sleep": 1.15, "heal": 1.2},
     "loft": {"title": "Лофт", "rent": 520, "base": 68.0, "sleep": 1.25, "heal": 1.35},
     "penthouse": {"title": "Пентхаус", "rent": 1200, "base": 76.0, "sleep": 1.35, "heal": 1.5},
 }
 FOOD = {
-    "regular": {"title": "Обычное", "cost": 70},
+    "regular": {"title": "Обычное", "cost": 50},
 }
 
 # ---------- Суточные события (в полночь по Ташкенту) ----------
@@ -98,11 +98,11 @@ EVENTS_SHOWN = 6                  # сколько событий «пока в�
 # level: вес в генераторе вакансий; hours: сколько часов учёбы до получения;
 # fee: стоимость часа (списывается поминутно); need: что нужно получить заранее
 EDUCATION = {
-    "school": {"title": "Школа", "level": 1, "hours": 24, "fee": 20, "need": ()},
-    "college": {"title": "Колледж", "level": 2, "hours": 48, "fee": 45, "need": ("school",)},
-    "higher": {"title": "Высшее образование", "level": 3, "hours": 96, "fee": 90, "need": ("college",)},
-    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 16, "fee": 50, "need": ("school",)},
-    "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 24, "fee": 110, "need": ("college",)},
+    "school": {"title": "Школа", "level": 1, "hours": 12, "fee": 20, "need": ()},
+    "college": {"title": "Колледж", "level": 2, "hours": 18, "fee": 45, "need": ("school",)},
+    "higher": {"title": "Высшее образование", "level": 3, "hours": 48, "fee": 90, "need": ("college",)},
+    "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 12, "fee": 50, "need": ("school",)},
+    "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 18, "fee": 110, "need": ("college",)},
 }
 EDU_SESSION_HOURS = (1, 2, 4)     # длительность одного занятия на выбор
 EDU_MIN_ENERGY = 25.0             # меньше энергии - на занятие не прийти
@@ -111,30 +111,30 @@ EDU_HAPPY_RATE = -0.3             # счастье в час во время у�
 
 # ---------- Профессии ----------
 PROFESSIONS = {
-    "loader": {"title": "Грузчик", "edu": (), "min_rep": 0, "kinds": ("once", "perm"), "wage": 35,
+    "loader": {"title": "Грузчик", "edu": (), "min_rep": 0, "kinds": ("once", "perm"), "wage": 42,
                "shift": (4, 10), "energy": -8.0, "health": -1.2, "happy": -0.4,
-               "commute": (20, 40), "fare": 8, "off": (1, 2)},
-    "miner": {"title": "Шахтёр", "edu": (), "min_rep": 10, "kinds": ("once", "perm"), "wage": 48,
+               "commute": (5, 15), "fare": 8, "off": (1, 2)},
+    "miner": {"title": "Шахтёр", "edu": (), "min_rep": 10, "kinds": ("once", "perm"), "wage": 55,
               "shift": (6, 10), "energy": -9.0, "health": -1.8, "happy": -0.6,
-              "commute": (40, 70), "fare": 15, "off": (1, 2)},
-    "courier": {"title": "Курьер", "edu": ("school",), "min_rep": 5, "kinds": ("once", "perm"), "wage": 38,
+              "commute": (15, 35), "fare": 15, "off": (1, 2)},
+    "courier": {"title": "Курьер", "edu": ("school",), "min_rep": 5, "kinds": ("once", "perm"), "wage": 44,
                 "shift": (2, 8), "energy": -5.5, "health": -0.4, "happy": -0.2,
-                "commute": (10, 30), "fare": 0, "off": (0, 1)},
-    "cashier": {"title": "Кассир", "edu": ("school",), "min_rep": 10, "kinds": ("once", "perm"), "wage": 42,
+                "commute": (5, 10), "fare": 0, "off": (0, 1)},
+    "cashier": {"title": "Кассир", "edu": ("school",), "min_rep": 10, "kinds": ("once", "perm"), "wage": 48,
                 "shift": (4, 8), "energy": -4.0, "health": -0.2, "happy": -0.5,
                 "commute": (15, 35), "fare": 8, "off": (1, 2)},
-    "clerk": {"title": "Офисный клерк", "edu": ("college",), "min_rep": 25, "kinds": ("perm",), "wage": 62,
+    "clerk": {"title": "Офисный клерк", "edu": ("college",), "min_rep": 25, "kinds": ("perm",), "wage": 66,
               "shift": (4, 8), "energy": -3.5, "health": -0.3, "happy": -0.5,
-              "commute": (25, 50), "fare": 10, "off": (2, 2), "weekend": True},
+              "commute": (20, 40), "fare": 10, "off": (2, 2), "weekend": True},
     "accountant": {"title": "Бухгалтер", "edu": ("college", "course_acc"), "min_rep": 40, "kinds": ("once", "perm"),
                    "wage": 85, "shift": (4, 8), "energy": -3.5, "health": -0.3, "happy": -0.7,
-                   "commute": (25, 50), "fare": 10, "off": (2, 2), "weekend": True},
+                   "commute": (15, 35), "fare": 10, "off": (2, 2), "weekend": True},
     "engineer": {"title": "Инженер", "edu": ("higher",), "min_rep": 55, "kinds": ("perm",), "wage": 120,
                  "shift": (4, 10), "energy": -4.5, "health": -0.2, "happy": 0.2,
-                 "commute": (25, 60), "fare": 12, "off": (1, 2)},
+                 "commute": (20, 30), "fare": 12, "off": (1, 2)},
     "doctor": {"title": "Врач", "edu": ("higher", "course_med"), "min_rep": 75, "kinds": ("perm",),
                "wage": 190, "shift": (6, 12), "energy": -6.5, "health": -0.3, "happy": -0.9,
-               "commute": (20, 40), "fare": 12, "off": (0, 1)},
+               "commute": (15, 25), "fare": 12, "off": (0, 1)},
 }
 
 # ---------- Рынок вакансий ----------

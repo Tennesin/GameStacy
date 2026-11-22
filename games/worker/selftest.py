@@ -77,7 +77,7 @@ def test_daily_and_debt():
     p = L.new_player(1, start)
     assert L.catch_up(p, start + timedelta(minutes=50), TZ) == []
     ev = L.catch_up(p, start + timedelta(hours=2), TZ)
-    assert p.money == R.START_MONEY - 180 and kinds(ev).count("daily") == 1
+    assert p.money == R.START_MONEY - L.daily_cost(p) and kinds(ev).count("daily") == 1
 
     p = L.new_player(2, start)
     p.money = 0
