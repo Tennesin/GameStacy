@@ -282,11 +282,49 @@ def venue_text(p) -> str:
     if "ingr" in v["cats"]:
         used = len(set(p.fridge) | set(p.bag))
         lines += ["", f"🧺 Продукты не съедаются: они едут с вами в сумке и ложатся в холодильник дома "
-                      f"(слотов занято {used} из {R.FRIDGE_SLOTS}). Берём: **{QTY_LABELS[p.buy_qty]}**."]
+                      f"(слотов занято {used} из {R.FRIDGE_SLOTS})."]
         if p.bag:
             lines.append("🛍 В сумке: " + ", ".join(
                 f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}" for c, n in p.bag.items()))
-    lines += ["", "Выберите товар в списке. Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
+    lines += ["", "Выберите товар в списке: откроется окно подтверждения, где его можно купить или отказаться. "
+                  "Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
+    return "\n".join(lines)
+
+def buy_confirm_text(p) -> str:
+    """Окно подтверждения покупки: что берём, сколько это стоит и что будет после покупки."""
+    v = R.VENUES[p.venue]
+    code = p.buy_item
+    item = L.item_of(code)
+    unit = L.good_price(p.venue, code)
+    lines = [f"🛒 **Подтверждение покупки** · {v['emoji']} {v['title']}", ""]
+
+    if code in R.INGREDIENTS:
+        packs, _free = L.ingredient_offer(p, code)
+        total = unit * packs
+        have = L.held(p, code)
+        lines += [f"**{item['title']}** — {money(unit)} за упаковку ({L.amount_text(code, item['pack'])})",
+                  f"У вас сейчас: {L.amount_text(code, have) if have else 'нет'} "
+                  f"(слот вмещает до {L.amount_text(code, item['slot'])})",
+                  f"Количество: **{QTY_LABELS[p.buy_qty]}**"]
+        if packs > 0:
+            lines.append(f"Будет куплено: {L.amount_text(code, packs * item['pack'])} за {money(total)}")
+    else:
+        total = unit
+        left = L.good_limit(code) - p.day_buys.get(code, 0)
+        lines += [f"**{item['title']}** — {money(unit)}",
+                  f"Эффект: {effect_text(item)}",
+                  f"Сегодня можно купить ещё: {max(0, left)}"]
+
+    lines.append("")
+    if p.money >= total:
+        lines.append(f"💰 У вас {money(p.money)} → после покупки {money(p.money - total)}")
+    else:
+        lines.append(f"💰 У вас {money(p.money)}, нужно {money(total)}")
+    why = L.buy_problem(p, code)
+    if why:
+        lines.append(f"🚫 Сейчас купить нельзя: {why}")
+    else:
+        lines.append("Деньги спишутся только после нажатия «Купить».")
     return "\n".join(lines)
 
 def ent_text(p) -> str:
@@ -513,6 +551,8 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = market_text(p)
     elif screen == "venue" and p.venue:
         text = venue_text(p)
+    elif screen == "buy_confirm" and p.venue and p.buy_item:
+        text = buy_confirm_text(p)
     elif screen == "ent":
         text = ent_text(p)
     elif screen == "kitchen":

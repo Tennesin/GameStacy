@@ -49,6 +49,7 @@ ALL_SPECS = [
     Spec("house_go", "Куда переехать?", None, 4, "select"),
     Spec("edu_go", "Чему учиться?", None, 4, "select"),
     Spec("kitchen", "🍳 Кухня", PRIMARY, 0),
+    Spec("buy_do", "🛒 Купить", SUCCESS, 3), Spec("buy_back", "◀ Назад", SECONDARY, 3),
     Spec("buy_qty", "Сколько продуктов?", None, 4, "select"),
     Spec("cook_go", "Что приготовить?", None, 4, "select"),
 ]
@@ -159,10 +160,15 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return [Spec("go_food", "🥖 Продукты", PRIMARY, 0), Spec("go_pharm", "💊 Аптека", PRIMARY, 0),
                 Spec("go_super", "🛍 Супермаркет", PRIMARY, 0), Spec("leisure", "◀ Назад", SECONDARY, 1)]
     if screen == "venue" and p is not None and p.venue:
-        specs = [Spec("buy", "Что купить?", None, 0, "select", venue_opts(p))]
-        if "ingr" in R.VENUES[p.venue]["cats"]:
-            specs.append(Spec("buy_qty", "Сколько продуктов?", None, 1, "select", qty_opts()))
-        return specs + [Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 2)]
+        return [Spec("buy", "Что купить?", None, 0, "select", venue_opts(p)),
+                Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 1)]
+    if screen == "buy_confirm" and p is not None and p.venue and p.buy_item:
+        specs, row = [], 0
+        if p.buy_item in R.INGREDIENTS:
+            specs.append(Spec("buy_qty", "Сколько продуктов?", None, 0, "select", qty_opts()))
+            row = 1
+        return specs + [Spec("buy_do", "🛒 Купить", SUCCESS, row),
+                        Spec("buy_back", "◀ Назад", SECONDARY, row)]
     if screen == "ent":
         return [Spec("ent_go", "Куда пойти?", None, 0, "select", ent_opts(p)),
                 Spec("leisure", "◀ Назад", SECONDARY, 1)]

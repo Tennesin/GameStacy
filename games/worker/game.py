@@ -147,7 +147,8 @@ class WorkerController:
             return "status", "Игра заморожена: сначала разморозьте её.", False
 
         # В магазине можно только покупать и уходить
-        if p.venue and action not in ("status", "refresh", "buy", "buy_qty", "venue_leave"):
+        if p.venue and action not in ("status", "refresh", "buy", "buy_qty", "buy_do", "buy_back",
+                                      "venue_leave"):
             if action in ("market", "menu", "leisure", "menu_refresh"):
                 return "venue", "", True
             return "venue", "Сначала выйдите из магазина.", False
@@ -165,11 +166,26 @@ class WorkerController:
         if action in ("go_food", "go_pharm", "go_super"):
             ok, msg = L.start_errand(p, action[3:])
             return ("status" if ok else "market"), msg, ok
-        if action == "buy":
-            ok, msg = L.buy(p, value or "")
-            return ("venue" if p.venue else "status"), msg, ok
-        if action == "buy_qty":
+        if action == "buy":                                 # шаг 1: выбор товара, деньги не трогаем
+            ok, msg = L.pick_good(p, value or "")
+            if ok:
+                return "buy_confirm", msg, True
+            return ("venue" if p.venue else "status"), msg, False
+        if action == "buy_qty":                             # количество меняется в окне подтверждения
             p.buy_qty = value if value in ("1", "2", "max") else "1"
+            if p.venue and p.buy_item:
+                return "buy_confirm", "", True
+            return ("venue" if p.venue else "status"), "", True
+        if action == "buy_do":                              # шаг 2: «Купить»
+            ok, msg = L.buy_selected(p)
+            if ok:
+                return "venue", msg, True
+            if p.venue and p.buy_item:
+                return "buy_confirm", msg, False            # причина уйдёт скрытым сообщением, окно останется
+            return ("venue" if p.venue else "status"), msg, False
+        if action == "buy_back":                            # отмена: ничего не куплено, деньги целы
+            p.buy_item = None
+            return ("venue" if p.venue else "status"), "", True
             return "venue", "", True
         if action == "venue_leave":
             ok, msg = L.leave_venue(p)

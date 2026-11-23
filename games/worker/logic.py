@@ -107,6 +107,7 @@ class Player:
     cook_xp: float = 0.0                            # опыт Повара
     day_meals: int = 0                              # блюд, приготовленных за игровые сутки
     buy_qty: str = "1"                              # сколько продуктов брать: "1" / "2" / "max"
+    buy_item: Optional[str] = None                  # товар, выбранный в магазине (окно подтверждения)
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -125,7 +126,7 @@ class Player:
             "day_buys": dict(self.day_buys), "day_ent": dict(self.day_ent),
             "job": copy.deepcopy(self.job), "job_cooldown": iso(self.job_cooldown),
             "fridge": dict(self.fridge), "bag": dict(self.bag), "cook_xp": self.cook_xp,
-            "day_meals": self.day_meals, "buy_qty": self.buy_qty,
+            "day_meals": self.day_meals, "buy_qty": self.buy_qty, "buy_item": self.buy_item,
         }
 
     @classmethod
@@ -161,6 +162,7 @@ class Player:
         p.cook_xp = float(d.get("cook_xp", 0.0))
         p.day_meals = int(d.get("day_meals", 0))
         p.buy_qty = d.get("buy_qty", "1") if d.get("buy_qty") in ("1", "2", "max") else "1"
+        p.buy_item = d.get("buy_item")
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -951,62 +953,102 @@ def leave_venue(p: Player) -> tuple:
     if not p.venue:
         return False, "Вы не в магазине."
     p.venue = None
+    p.buy_item = None
     p.act = {"kind": "errand", "title": "Дорога домой", "quanta": R.ERRAND_QUANTA, "done_q": 0,
              "rates": {"energy": R.ERRAND_ENERGY_RATE}}
     return True, "Вы вышли из магазина и идёте домой."
 
-def buy(p: Player, code: str) -> tuple:
+def pick_good(p: Player, code: str) -> tuple:
+    """Шаг 1 покупки: игрок выбрал товар в списке. Деньги не списываются, открывается окно подтверждения."""
+    if not p.venue:
+        return False, "Вы не в магазине."
+    if code not in {c for c, _item in goods_of(p.venue)}:
+        return False, "Здесь такого нет."
+    p.buy_item = code
+    return True, ""
+
+def buy_selected(p: Player) -> tuple:
+    """Шаг 2 покупки: кнопка «Купить» в окне подтверждения. При успехе выбор сбрасывается."""
+    if not p.venue:
+        return False, "Вы не в магазине."
+    if not p.buy_item:
+        return False, "Сначала выберите товар."
+    ok, msg = buy(p, p.buy_item)
+    if ok:
+        p.buy_item = None
+    return ok, msg
+
+def ingredient_offer(p: Player, code: str) -> tuple:
+    """(сколько упаковок будет куплено по выбранному количеству, сколько упаковок ещё влезет в слот)."""
+    ing = R.INGREDIENTS[code]
+    free = max(0, (ing["slot"] - held(p, code)) // ing["pack"])
+    mode = p.buy_qty
+    packs = free if mode == "max" else (int(mode) if mode in ("1", "2") else 1)
+    return packs, free
+
+def buy_problem(p: Player, code: str) -> str:
+    """Почему этот товар сейчас купить нельзя. Пусто - можно. Ничего не меняет у игрока."""
     venue = p.venue
     if not venue:
-        return False, "Вы не в магазине."
+        return "Вы не в магазине."
     if code in R.INGREDIENTS:
-        return _buy_ingredient(p, venue, code)
+        ing = R.INGREDIENTS[code]
+        if ing["cat"] not in R.VENUES[venue]["cats"]:
+            return "Здесь такого нет."
+        if held(p, code) == 0 and len(set(p.fridge) | set(p.bag)) >= R.FRIDGE_SLOTS:
+            return (f"Холодильник полон: заняты все {R.FRIDGE_SLOTS} слотов "
+                    "(вместе с тем, что уже в сумке). Сначала приготовьте что-нибудь.")
+        packs, free = ingredient_offer(p, code)
+        if free <= 0:
+            return f"Слот «{ing['title']}» заполнен: больше {amount_text(code, ing['slot'])} не поместится."
+        if packs > free:
+            return (f"Столько не поместится: в слот войдёт ещё не больше "
+                    f"{amount_text(code, free * ing['pack'])}. Выберите меньшее количество.")
+        price = good_price(venue, code) * packs
+        if p.money < price:
+            return f"Не хватает денег ({price} м.)."
+        return ""
+
     item = R.GOODS.get(code)
     if item is None or item["cat"] not in R.VENUES[venue]["cats"]:
-        return False, "Здесь такого нет."
+        return "Здесь такого нет."
     price = good_price(venue, code)
     if p.money < price:
-        return False, f"Не хватает денег ({price} м.)."
+        return f"Не хватает денег ({price} м.)."
     if p.day_buys.get(code, 0) >= good_limit(code):
-        return False, f"На сегодня лимит по этому товару исчерпан ({good_limit(code)} шт.)."
+        return f"На сегодня лимит по этому товару исчерпан ({good_limit(code)} шт.)."
     gain = {"energy": item.get("energy", 0), "health": item.get("health", 0), "happiness": item.get("happy", 0)}
     cur = {"energy": p.energy, "health": p.health, "happiness": p.happiness}
     if not any(gain[k] > 0 and cur[k] < 100 for k in gain):
-        return False, "Вам это сейчас ни к чему: показатели уже на максимуме."
+        return "Вам это сейчас ни к чему: показатели уже на максимуме."
     if gain["health"] < 0 and p.health + gain["health"] < R.HEALTH_CAREER_BLOCK:
-        return False, "Здоровье и так слишком низкое: это вам сейчас вредно."
+        return "Здоровье и так слишком низкое: это вам сейчас вредно."
+    return ""
+
+def buy(p: Player, code: str) -> tuple:
+    """Сама покупка (списание денег). Вызывается только из buy_selected, после подтверждения."""
+    why = buy_problem(p, code)
+    if why:
+        return False, why
+    venue = p.venue
+    if code in R.INGREDIENTS:                              # продукт не съедается, а едет в сумку
+        ing = R.INGREDIENTS[code]
+        packs, _free = ingredient_offer(p, code)
+        price = good_price(venue, code) * packs
+        got = packs * ing["pack"]
+        p.money -= price
+        p.bag[code] = p.bag.get(code, 0) + got
+        return True, (f"В сумке: {ing['title']} {amount_text(code, got)} за {price} м. "
+                      "В холодильнике это окажется, когда вы вернётесь домой.")
+
+    item = R.GOODS[code]
+    price = good_price(venue, code)
     p.money -= price
-    p.energy = clamp(p.energy + gain["energy"])
-    p.health = clamp(p.health + gain["health"])
-    p.happiness = clamp(p.happiness + gain["happiness"])
+    p.energy = clamp(p.energy + item.get("energy", 0))
+    p.health = clamp(p.health + item.get("health", 0))
+    p.happiness = clamp(p.happiness + item.get("happy", 0))
     p.day_buys[code] = p.day_buys.get(code, 0) + 1
     return True, f"Куплено: {item['title']} за {price} м."
-
-def _buy_ingredient(p: Player, venue: str, code: str) -> tuple:
-    """Продукт: не съедается, а едет в сумку. Количество берётся из p.buy_qty."""
-    ing = R.INGREDIENTS[code]
-    if ing["cat"] not in R.VENUES[venue]["cats"]:
-        return False, "Здесь такого нет."
-    have = held(p, code)
-    if have == 0 and len(set(p.fridge) | set(p.bag)) >= R.FRIDGE_SLOTS:
-        return False, (f"Холодильник полон: заняты все {R.FRIDGE_SLOTS} слотов "
-                       "(вместе с тем, что уже в сумке). Сначала приготовьте что-нибудь.")
-    free = (ing["slot"] - have) // ing["pack"]
-    if free <= 0:
-        return False, f"Слот «{ing['title']}» заполнен: больше {amount_text(code, ing['slot'])} не поместится."
-    mode = p.buy_qty
-    packs = free if mode == "max" else (int(mode) if mode in ("1", "2") else 1)
-    if packs > free:
-        return False, (f"Столько не поместится: в слот войдёт ещё не больше "
-                       f"{amount_text(code, free * ing['pack'])}.")
-    price = good_price(venue, code) * packs
-    if p.money < price:
-        return False, f"Не хватает денег ({price} м.)."
-    p.money -= price
-    got = packs * ing["pack"]
-    p.bag[code] = p.bag.get(code, 0) + got
-    return True, (f"В сумке: {ing['title']} {amount_text(code, got)} за {price} м. "
-                  "В холодильнике это окажется, когда вы вернётесь домой.")
 
 # ---------- Продукты и готовка ----------
 
