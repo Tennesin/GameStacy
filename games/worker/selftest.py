@@ -649,6 +649,140 @@ def test_info():
         assert len(text) <= PAGE_LIMIT, (key, len(text))
     print("справка /workinfo: OK")
 
+# ---------- Контент, окно подтверждения, страницы ----------
+
+def maxed_player() -> L.Player:
+    """Игрок с максимумом доступного: всё образование, большой холодильник, опыт во всех профессиях."""
+    p = L.new_player(1, T0)
+    p.money, p.reputation, p.cook_xp, p.housing = 10 ** 6, 100.0, 10 ** 4, "penthouse"
+    p.education = list(R.EDUCATION)
+    p.exp = {c: 100.0 for c in R.PROFESSIONS}
+    p.fridge = {c: R.INGREDIENTS[c]["slot"] for c in list(R.INGREDIENTS)[:L.fridge_slots(p)]}
+    return p
+
+def check_specs(specs: list, where: str):
+    """Лимиты Discord: пунктов в списке до 25, подписи до 100, в ряду не больше 5 «клеток»."""
+    rows = {}
+    for s in specs:
+        if s.kind == "select":
+            opts = s.opts or []
+            assert 1 <= len(opts) <= 25, (where, s.action, len(opts))
+            assert len(s.label) <= 150, (where, s.label)
+            for label, value, desc in opts:
+                assert 1 <= len(label) <= 100 and len(value) <= 100, (where, label)
+                assert desc is None or len(desc) <= 100, (where, label, len(desc))
+        else:
+            assert len(s.label) <= 80, (where, s.label)
+        rows.setdefault(s.row, []).append(s)
+    for r, items in rows.items():
+        width = sum(5 if i.kind == "select" else 1 for i in items)
+        assert width <= 5, (where, r, [i.action for i in items])
+
+def test_content_limits():
+    from . import texts as T
+    from .views import build_specs
+    fresh = L.new_player(2, T0)
+    fresh.money, fresh.education = 5000, ["school", "college"]
+    for who, p in (("maxed", maxed_player()), ("fresh", fresh)):
+        # постраничные экраны: каждая страница, каждого магазина
+        for scr, body in (("kitchen", T.kitchen_text), ("ent", T.ent_text), ("edu", T.edu_text)):
+            pages = L.page_slice(L.screen_items(p, scr), scr, 0)[2]
+            for pg in range(pages):
+                p.page, p.list_screen = pg, scr
+                assert len(body(p)) <= 1900, (who, scr, pg, len(body(p)))
+                check_specs(build_specs(scr, p), f"{who}:{scr}:{pg}")
+        for venue in R.VENUES:
+            p.venue = venue
+            pages = L.page_slice(L.screen_items(p, "venue"), "venue", 0)[2]
+            for pg in range(pages):
+                p.page, p.list_screen = pg, "venue"
+                assert len(T.venue_text(p)) <= 1900, (who, venue, pg, len(T.venue_text(p)))
+                check_specs(build_specs("venue", p), f"{who}:{venue}:{pg}")
+            p.buy_item = next(iter(L.screen_items(p, "venue")))[0]
+            check_specs(build_specs("buy_confirm", p), f"{who}:{venue}:buy")
+            assert len(T.buy_confirm_text(p)) <= 1900
+            p.buy_item = None
+        p.venue, p.page = None, 0
+        # остальные экраны
+        for name, text in (("hospital", T.hospital_text(p)), ("housing", T.housing_text(p, T0, TZ)),
+                           ("status", T.status_text(p, T0, TZ))):
+            assert len(text) <= 1900, (who, name, len(text))
+        for scr in ("menu", "career", "leisure", "market", "hospital", "housing", "sleep", "status"):
+            check_specs(build_specs(scr, p), f"{who}:{scr}")
+        # окно подтверждения: каждый вариант каждого вида
+        for kind, table in L.PICK_TABLES.items():
+            for code in table:
+                assert L.set_pick(p, kind, code)[0]
+                assert len(T.pick_text(p, T0, TZ)) <= 1900, (who, kind, code)
+                check_specs(build_specs("pick", p), f"{who}:pick:{kind}:{code}")
+        L.clear_pick(p)
+    print("лимиты списков и текстов: OK")
+
+def test_pick_flow():
+    p = L.new_player(1, T0)
+    p.money, p.energy = 1000, 80.0
+    assert L.set_pick(p, "ent", "cinema")[0] and p.pick_hours == 2          # у кино один вариант
+    assert L.set_pick(p, "ent", "park")[0] and p.pick_hours == 1
+    L.set_pick_hours(p, 3)
+    assert p.pick_hours == 3
+    L.set_pick_hours(p, 9)
+    assert p.pick_hours == 3                                                # недопустимое игнорируется
+    assert not L.set_pick(p, "ent", "нет_такого")[0]
+    assert L.pick_problem(p, T0, TZ) == "" and p.act is None and p.money == 1000
+    assert L.L if False else True
+    p.money = 0
+    L.set_pick(p, "ent", "cinema")
+    assert L.pick_problem(p, T0, TZ) != "" and p.money == 0                 # причина найдена, игрок цел
+    p.money = 1000
+    ok, _ = L.pick_start(p, T0, TZ)
+    assert ok and p.act["kind"] == "leisure" and p.money == 1000 - 70
+    L.clear_pick(p)
+    assert L.Player.restore(json.loads(json.dumps(p.snapshot()))).snapshot() == p.snapshot()
+
+    q = L.new_player(2, T0)                                                 # переезд через окно подтверждения
+    q.money = 5000
+    L.set_pick(q, "house", "loft")
+    assert L.pick_start(q, T0, TZ)[0] and q.housing == "loft"
+
+    r = L.new_player(3, T0)                                                 # учёба: длительность выбирается
+    r.money = 1000
+    L.set_pick(r, "edu", "school", 4)
+    assert r.pick_hours == 4 and L.pick_start(r, T0, TZ)[0] and r.act["kind"] == "study"
+
+    s = L.Player.restore({**L.new_player(4, T0).snapshot(), "pick_kind": "ent", "pick_code": "удалённый"})
+    assert s.pick_kind is None                                              # выведенный из игры код не ломает снимок
+    print("выбор с подтверждением: OK")
+
+def test_paging_and_levels():
+    size = R.PAGE_SIZES["venue"]
+    chunk, page, pages = L.page_slice(list(range(20)), "venue", 99)
+    assert page == pages - 1 and len(chunk) == 20 - (pages - 1) * size
+    assert L.page_slice(list(range(20)), "venue", -5)[1] == 0
+    assert L.page_slice([], "venue", 3) == ([], 0, 1)
+
+    # уровень Повара открывает рецепты
+    p = L.new_player(1, T0)
+    p.fridge = dict(R.RECIPES["borscht"]["items"])
+    ok, why = L.can_cook(p, "borscht")
+    assert not ok and "уровне Повара" in why
+    p.cook_xp = 10 ** 4
+    assert L.can_cook(p, "borscht")[0]
+    assert [c for c, r in L.recipe_list()][0] in R.RECIPES
+    assert all(a[1].get("lvl", 0) <= b[1].get("lvl", 0) for a, b in zip(L.recipe_list(), L.recipe_list()[1:]))
+
+    # холодильник зависит от жилья
+    q = L.new_player(2, T0)
+    q.money = 5000
+    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:6]}
+    assert L.fridge_slots(q) == 10
+    assert not L.can_move(q, "bunk", T0, TZ)[0]                             # там только 4 слота
+    assert L.can_move(q, "dorm", T0, TZ)[0]                                 # 6 слотов: помещается ровно
+    q.housing = "bunk"
+    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:4]}
+    q.venue = "food"
+    assert "Холодильник полон" in L.buy_problem(q, "pasta")                 # пятый вид не влезает
+    print("страницы, уровни рецептов, холодильник: OK")
+
 def main():
     test_tax()
     test_sleep()
@@ -674,6 +808,9 @@ def main():
     test_education()
     test_kitchen()
     test_info()
+    test_content_limits()
+    test_pick_flow()
+    test_paging_and_levels()
     print("Все проверки пройдены.")
 
 if __name__ == "__main__":

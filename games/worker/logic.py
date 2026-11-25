@@ -108,6 +108,11 @@ class Player:
     day_meals: int = 0                              # блюд, приготовленных за игровые сутки
     buy_qty: str = "1"                              # сколько продуктов брать: "1" / "2" / "max"
     buy_item: Optional[str] = None                  # товар, выбранный в магазине (окно подтверждения)
+    pick_kind: Optional[str] = None                 # окно подтверждения: ent / edu / course / cook / house
+    pick_code: Optional[str] = None                 # что именно выбрано
+    pick_hours: int = 0                             # выбранная длительность (0 - у варианта её нет)
+    page: int = 0                                   # страница текущего постраничного списка
+    list_screen: Optional[str] = None               # какой постраничный экран сейчас открыт
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -127,6 +132,8 @@ class Player:
             "job": copy.deepcopy(self.job), "job_cooldown": iso(self.job_cooldown),
             "fridge": dict(self.fridge), "bag": dict(self.bag), "cook_xp": self.cook_xp,
             "day_meals": self.day_meals, "buy_qty": self.buy_qty, "buy_item": self.buy_item,
+            "pick_kind": self.pick_kind, "pick_code": self.pick_code, "pick_hours": self.pick_hours,
+            "page": self.page, "list_screen": self.list_screen,
         }
 
     @classmethod
@@ -163,6 +170,12 @@ class Player:
         p.day_meals = int(d.get("day_meals", 0))
         p.buy_qty = d.get("buy_qty", "1") if d.get("buy_qty") in ("1", "2", "max") else "1"
         p.buy_item = d.get("buy_item")
+        p.pick_kind, p.pick_code = d.get("pick_kind"), d.get("pick_code")
+        p.pick_hours = int(d.get("pick_hours", 0))
+        p.page = int(d.get("page", 0))
+        p.list_screen = d.get("list_screen")
+        if p.pick_kind not in PICK_TABLES or p.pick_code not in PICK_TABLES.get(p.pick_kind, {}):
+            p.pick_kind, p.pick_code, p.pick_hours = None, None, 0     # код мог быть выведен из игры
         return p
 
 def new_player(uid: int, now: datetime) -> Player:
@@ -902,6 +915,10 @@ def can_move(p: Player, code: str, now: datetime, tz: tzinfo) -> tuple:
     fee = move_cost(code)
     if p.money < fee:
         return False, f"Не хватает денег на переезд ({fee} м.)."
+    used, cap = len(set(p.fridge) | set(p.bag)), housing_fridge(code)
+    if used > cap:
+        return False, (f"В новом жилье холодильник меньше ({cap} слотов), а у вас занято {used}: "
+                       "сначала освободите места.")
     return True, ""
 
 def move_housing(p: Player, code: str, now: datetime, tz: tzinfo) -> tuple:
@@ -995,8 +1012,8 @@ def buy_problem(p: Player, code: str) -> str:
         ing = R.INGREDIENTS[code]
         if ing["cat"] not in R.VENUES[venue]["cats"]:
             return "Здесь такого нет."
-        if held(p, code) == 0 and len(set(p.fridge) | set(p.bag)) >= R.FRIDGE_SLOTS:
-            return (f"Холодильник полон: заняты все {R.FRIDGE_SLOTS} слотов "
+        if held(p, code) == 0 and len(set(p.fridge) | set(p.bag)) >= fridge_slots(p):
+            return (f"Холодильник полон: заняты все {fridge_slots(p)} слотов "
                     "(вместе с тем, что уже в сумке). Сначала приготовьте что-нибудь.")
         packs, free = ingredient_offer(p, code)
         if free <= 0:
@@ -1120,6 +1137,10 @@ def missing_ingredients(p: Player, code: str) -> list:
 def can_cook(p: Player, code: str) -> tuple:
     if code not in R.RECIPES:
         return False, "Такого блюда нет."
+    need = R.RECIPES[code].get("lvl", 0)
+    have = cook_level(p.cook_xp)
+    if have < need:
+        return False, f"Рецепт откроется на уровне Повара {need} (сейчас {have})."
     why = free_reason(p)
     if why:
         return False, why
@@ -1282,3 +1303,95 @@ def unfreeze(p: Player, now: datetime, tz: tzinfo) -> tuple:
     p.frozen_at = None
     p.last_unfreeze = now
     return True, "С возвращением! Время рабочего снова идёт."
+
+# ---------- Холодильник по жилью ----------
+
+def housing_fridge(code: str) -> int:
+    return R.HOUSING.get(code, {}).get("fridge", R.FRIDGE_SLOTS)
+
+def fridge_slots(p: Player) -> int:
+    """Слотов холодильника в нынешнем жилье игрока."""
+    return housing_fridge(p.housing)
+
+# ---------- Постраничные списки ----------
+
+PAGED_SCREENS = ("venue", "kitchen", "ent", "edu")
+
+def page_slice(items: list, screen: str, page: int) -> tuple:
+    """(элементы страницы, номер страницы с нуля - уже зажатый в границы, число страниц)."""
+    size = max(1, R.PAGE_SIZES.get(screen, 8))
+    pages = max(1, math.ceil(len(items) / size))
+    page = max(0, min(int(page), pages - 1))
+    return items[page * size:(page + 1) * size], page, pages
+
+def recipe_list() -> list:
+    """Рецепты по возрастанию требуемого уровня (порядок внутри уровня - как в rules.py)."""
+    return sorted(R.RECIPES.items(), key=lambda kv: kv[1].get("lvl", 0))
+
+def screen_items(p: Player, screen: str) -> list:
+    """Полный список пунктов постраничного экрана: пары (код, описание)."""
+    if screen == "venue":
+        return goods_of(p.venue) if p.venue else []
+    if screen == "kitchen":
+        return recipe_list()
+    if screen == "ent":
+        return list(R.ENTERTAINMENT.items())
+    if screen == "edu":
+        return list(R.EDUCATION.items())
+    return []
+
+# ---------- Выбор с подтверждением (досуг, учёба, курсы, готовка, переезд) ----------
+
+PICK_TABLES = {"ent": R.ENTERTAINMENT, "edu": R.EDUCATION, "course": R.COURSES,
+               "cook": R.RECIPES, "house": R.HOUSING}
+PICK_BACK = {"ent": "ent", "edu": "edu", "course": "hospital", "cook": "kitchen", "house": "housing"}
+
+def pick_hours_options(kind, code) -> tuple:
+    """Какие длительности можно выбрать (пусто - у варианта длительности нет)."""
+    if kind == "ent" and code in R.ENTERTAINMENT:
+        return tuple(R.ENTERTAINMENT[code]["hours"])
+    if kind == "edu":
+        return tuple(R.EDU_SESSION_HOURS)
+    return ()
+
+def clear_pick(p: Player):
+    p.pick_kind = p.pick_code = None
+    p.pick_hours = 0
+
+def set_pick(p: Player, kind: str, code: str, hours: int = 0) -> tuple:
+    """Шаг 1: игрок выбрал вариант в списке. Деньги не трогаем."""
+    table = PICK_TABLES.get(kind)
+    if table is None or code not in table:
+        return False, "Не удалось понять выбор."
+    opts = pick_hours_options(kind, code)
+    p.pick_kind, p.pick_code = kind, code
+    p.pick_hours = hours if hours in opts else (opts[0] if opts else 0)
+    return True, ""
+
+def set_pick_hours(p: Player, hours: int):
+    if p.pick_kind and hours in pick_hours_options(p.pick_kind, p.pick_code):
+        p.pick_hours = hours
+
+def pick_start(p: Player, now: datetime, tz: tzinfo) -> tuple:
+    """Шаг 2: кнопка «Начать». Вызывает обычную функцию запуска нужного дела."""
+    kind, code, h = p.pick_kind, p.pick_code, p.pick_hours
+    if not kind or not code:
+        return False, "Сначала выберите вариант."
+    if kind == "ent":
+        return start_leisure(p, code, h)
+    if kind == "edu":
+        return start_study(p, code, h)
+    if kind == "course":
+        return start_course(p, code)
+    if kind == "cook":
+        return start_cook(p, code)
+    if kind == "house":
+        return move_housing(p, code, now, tz)
+    return False, "Не удалось понять выбор."
+
+def pick_problem(p: Player, now: datetime, tz: tzinfo) -> str:
+    """Что мешает начать прямо сейчас (пусто - можно). Проверка идёт на копии: игрок не меняется."""
+    if not p.pick_kind or not p.pick_code:
+        return "Сначала выберите вариант."
+    ok, msg = pick_start(Player.restore(p.snapshot()), now, tz)
+    return "" if ok else msg

@@ -199,7 +199,7 @@ def status_text(p, now: datetime, tz) -> str:
                  f"🍽 {R.FOOD[p.food]['title']}: {money(L.daily_cost(p))} в сутки")
     if p.fridge or p.bag:
         extra = f" · 🛍 в сумке видов: {len(p.bag)}" if p.bag else ""
-        lines.append(f"🧊 Холодильник: {len(p.fridge)} из {R.FRIDGE_SLOTS} слотов{extra}")
+        lines.append(f"🧊 Холодильник: {len(p.fridge)} из {L.fridge_slots(p)} слотов{extra}")
     if p.cook_xp > 0:
         lines.append(f"👨‍🍳 Повар: уровень {L.cook_level(p.cook_xp)}")
     if p.job:
@@ -267,10 +267,12 @@ QTY_LABELS = {"1": "1 упаковка (яйца: 6 шт.)", "2": "2 упако�
 
 def venue_text(p) -> str:
     v = R.VENUES[p.venue]
-    lines = [f"{v['emoji']} **{v['title']}**", f"💰 У вас {money(p.money)}.", ""]
+    chunk, page, pages = L.page_slice(L.screen_items(p, "venue"), "venue", p.page)
+    head = f"{v['emoji']} **{v['title']}**" + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+    lines = [head, f"💰 У вас {money(p.money)}.", ""]
     if v["markup"] > 1:
         lines += [f"Здесь всё дороже на {round((v['markup'] - 1) * 100)}%, зато есть и еда, и лекарства.", ""]
-    for code, item in L.goods_of(p.venue):
+    for code, item in chunk:
         price = money(L.good_price(p.venue, code))
         if code in R.INGREDIENTS:
             lines.append(f"• **{item['title']}** — {price} за {L.amount_text(code, item['pack'])} · "
@@ -282,12 +284,183 @@ def venue_text(p) -> str:
     if "ingr" in v["cats"]:
         used = len(set(p.fridge) | set(p.bag))
         lines += ["", f"🧺 Продукты не съедаются: они едут с вами в сумке и ложатся в холодильник дома "
-                      f"(слотов занято {used} из {R.FRIDGE_SLOTS})."]
+                      f"(слотов занято {used} из {L.fridge_slots(p)})."]
         if p.bag:
             lines.append("🛍 В сумке: " + ", ".join(
                 f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}" for c, n in p.bag.items()))
-    lines += ["", "Выберите товар в списке: откроется окно подтверждения, где его можно купить или отказаться. "
-                  "Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
+    lines += ["", "Выберите товар в списке: откроется окно подтверждения, где его можно купить или отказаться."
+                  + (" Страницы листаются кнопками." if pages > 1 else "")
+                  + " Закончив, нажмите «Уйти из магазина»: дорога домой тоже занимает время."]
+    return "\n".join(lines)
+
+def ent_text(p) -> str:
+    chunk, page, pages = L.page_slice(L.screen_items(p, "ent"), "ent", p.page)
+    head = "🎭 **Развлечения**" + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+    lines = [head, f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%",
+             f"Первые {R.DIM_TIERS[0][0]:.0f} ч одного занятия за сутки дают полный эффект, "
+             "дальше отдача падает.", ""]
+    for code, e in chunk:
+        used_h = p.day_ent.get(code, 0) * R.QUANTUM_MINUTES / 60
+        cost = "бесплатно" if not e["cost"] else f"{e['cost']} м./ч"
+        eff = f"счастье {e['happy']:+g}/ч"
+        if e["health"]:
+            eff += f", здоровье {e['health']:+g}/ч"
+        if e["energy"]:
+            eff += f", энергия {e['energy']:+g}/ч"
+        used = f" · сегодня уже {used_h:g} ч" if used_h else ""
+        lines.append(f"• **{e['title']}** — {cost} · {eff}{used}")
+    lines += ["", f"Начать можно при энергии не ниже {R.LEISURE_MIN_ENERGY:.0f}%. "
+                  "Выберите занятие в списке: откроется окно, где задаются длительность и подтверждение."]
+    return "\n".join(lines)
+
+def edu_text(p) -> str:
+    chunk, page, pages = L.page_slice(L.screen_items(p, "edu"), "edu", p.page)
+    head = "🎓 **Образование**" + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+    lines = [head,
+             "Учёба идёт по часам, оплата списывается по минутам, пока вы учитесь. Закончить можно в любой "
+             "момент: штрафов нет, прогресс сохраняется. Если кончатся деньги или силы, занятие прервётся само.",
+             f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%", ""]
+    for code, e in chunk:
+        if code in p.education:
+            lines.append(f"✅ **{e['title']}** — получено")
+            continue
+        need_min = e["hours"] * 60
+        done = min(need_min, p.edu_progress.get(code, 0))
+        base = (f"**{e['title']}** — {e['hours']} ч · {e['fee']} м./ч "
+                f"(≈ {money(e['hours'] * e['fee'])} всего)")
+        unlocks = edu_unlocks(code)
+        tail = f" · нужно для: {unlocks}" if unlocks else ""
+        missing = L.edu_missing(p, code)
+        if missing:
+            lines.append(f"🔒 {base} · сначала: {', '.join(missing)}{tail}")
+        else:
+            prog = f" · пройдено {done / 60:.1f} из {e['hours']} ч ({done * 100 // need_min}%)" if done else ""
+            lines.append(f"📖 {base}{prog}{tail}")
+    return "\n".join(lines)
+
+def fridge_text(p) -> str:
+    items = [f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}"
+             for c, n in p.fridge.items() if c in R.INGREDIENTS]
+    head = f"🧊 **Холодильник** ({len(p.fridge)} из {L.fridge_slots(p)} слотов): "
+    return head + ("; ".join(items) if items else "пусто")
+
+def kitchen_text(p) -> str:
+    lvl, left = L.cook_progress(p.cook_xp)
+    pk = L.cook_perks(lvl)
+    em = L.tier_mult(R.COOK_EFFECT_TIERS, p.day_meals)
+    xm = L.tier_mult(R.COOK_XP_TIERS, p.day_meals)
+    chunk, page, pages = L.page_slice(L.screen_items(p, "kitchen"), "kitchen", p.page)
+    head = "🍳 **Кухня**" + (f" · страница {page + 1} из {pages}" if pages > 1 else "")
+    lvl_line = f"👨‍🍳 **Повар:** уровень {lvl} из {R.COOK_MAX_LEVEL}"
+    if left is not None:
+        lvl_line += f" (до следующего: {left:.1f} опыта)".replace(".", ",")
+    lines = [head, lvl_line,
+             f"Время готовки ×{pk['time']:.2f}, сытность и радость ×{pk['boost']:.2f}",
+             fridge_text(p),
+             f"Блюд приготовлено сегодня: {p.day_meals}. Следующее даст {em * 100:.0f}% эффекта "
+             f"и {xm * 100:.0f}% опыта.", ""]
+    for code, r in chunk:
+        need_lvl = r.get("lvl", 0)
+        if lvl < need_lvl:
+            lines.append(f"🔒 **{r['title']}** — откроется на уровне Повара {need_lvl}")
+            continue
+        plan = L.cook_plan(p, code)
+        mark = "❌" if L.missing_ingredients(p, code) else "✅"
+        need = ", ".join(f"{R.INGREDIENTS[i]['title'].lower()} {L.amount_text(i, n)}"
+                         for i, n in r["items"].items())
+        lines.append(f"{mark} **{r['title']}** — {plan['quanta'] * R.QUANTUM_MINUTES} мин · "
+                     f"⚡+{plan['energy']:.0f} 😊+{plan['happy']:.0f} · {need}")
+    lines += ["", f"Готовить можно дома, когда вы свободны (энергия не ниже {R.COOK_MIN_ENERGY:.0f}%). "
+                  "Выберите блюдо: продукты спишутся только после подтверждения. "
+                  "Начатую готовку прервать нельзя."]
+    return "\n".join(lines)
+
+def housing_text(p, now: datetime, tz) -> str:
+    h = R.HOUSING[p.housing]
+    lines = ["🏠 **Жильё**",
+             f"Сейчас: {h['title']} — {money(h['rent'])}/сут., счастье тянется к {h['base']:.0f}%, "
+             f"холодильник {h['fridge']} слотов.", ""]
+    for code, x in R.HOUSING.items():
+        mark = "▶ " if code == p.housing else "• "
+        lines.append(f"{mark}**{x['title']}** — {money(x['rent'])}/сут. · планка {x['base']:.0f}% · "
+                     f"сон ×{x['sleep']:.2f}, лечение ×{x['heal']:.2f} · 🧊 {x['fridge']}")
+    lines += ["", f"Переезд стоит {R.HOUSING_MOVE_DAYS} суток аренды нового жилья; "
+                  f"чаще раза в {R.HOUSING_MOVE_COOLDOWN_HOURS} ч переезжать нельзя. "
+                  "В жилье с меньшим холодильником нельзя переехать, пока в нём занято больше слотов."]
+    if p.last_move:
+        until = p.last_move + timedelta(hours=R.HOUSING_MOVE_COOLDOWN_HOURS)
+        if now < until:
+            lines.append(f"Следующий переезд {ts(until)}.")
+    return "\n".join(lines)
+
+def pick_text(p, now: datetime, tz) -> str:
+    """Окно подтверждения: что выбрано, сколько стоит, что получится и что мешает."""
+    kind, code, h = p.pick_kind, p.pick_code, p.pick_hours
+    hint = " (можно изменить в списке ниже)" if len(L.pick_hours_options(kind, code)) > 1 else ""
+    total = 0
+    if kind == "ent":
+        e = R.ENTERTAINMENT[code]
+        mult = L.dim_mult(p.day_ent.get(code, 0), h * 60 // R.QUANTUM_MINUTES)
+        total = e["cost"] * h
+        eff = []
+        for key, name in (("happy", "счастье"), ("health", "здоровье"), ("energy", "энергия")):
+            v = e[key]
+            if v:
+                eff.append(f"{name} {(v * mult if v > 0 else v):+.1f}/ч")
+        lines = [f"🎭 **Подтверждение: {e['title']}**", "",
+                 f"Длительность: **{h} ч**{hint}",
+                 f"Цена: {money(total) if total else 'бесплатно'}",
+                 "Эффект: " + ", ".join(eff),
+                 f"Отдача сегодня: ×{mult:.2f}",
+                 "Закончить раньше срока можно, но деньги не возвращаются."]
+    elif kind == "edu":
+        e = R.EDUCATION[code]
+        need_min = e["hours"] * 60
+        done = min(need_min, p.edu_progress.get(code, 0))
+        session = min(h * 60, L.edu_left_min(p, code))
+        lines = [f"📚 **Подтверждение: {e['title']}**", "",
+                 f"Занятие: до **{h} ч**{hint}",
+                 f"Оплата: {e['fee']} м./ч, списывается по минутам; за это занятие не больше "
+                 f"≈ {money(int(e['fee'] * session / 60))}",
+                 f"Пройдено: {done / 60:.1f} из {e['hours']} ч ({done * 100 // need_min}%)",
+                 "Закончить можно в любой момент: штрафов нет, прогресс сохраняется."]
+    elif kind == "course":
+        c = R.COURSES[code]
+        total = c["cost"]
+        lines = [f"🎓 **Подтверждение: курс «{c['title']}»**", "",
+                 f"Цена: {money(total)}",
+                 f"Занятие: {c['lesson']} ч",
+                 f"После занятия: {buff_desc(c['kind'], c['power'])} на {c['hours']} ч"]
+        cur = p.buffs.get(c["kind"])
+        if cur:
+            lines.append(f"Сейчас у вас уже есть эффект этого вида ещё на "
+                         f"{dur(cur['left'] * R.QUANTUM_MINUTES)}: сильнее заменит, такой же продлит.")
+    elif kind == "cook":
+        r = R.RECIPES[code]
+        plan = L.cook_plan(p, code)
+        need = ", ".join(f"{R.INGREDIENTS[i]['title'].lower()} {L.amount_text(i, n)}"
+                         for i, n in r["items"].items())
+        lines = [f"🍳 **Подтверждение: {r['title']}**", "",
+                 f"Готовка: {plan['quanta'] * R.QUANTUM_MINUTES} мин",
+                 f"Продукты: {need}",
+                 f"Результат: энергия +{plan['energy']:.1f}, счастье +{plan['happy']:.1f}, "
+                 f"опыт Повара +{plan['xp']:.1f}",
+                 "Продукты спишутся сразу, прервать готовку нельзя."]
+    else:
+        x, cur = R.HOUSING[code], R.HOUSING[p.housing]
+        total = L.move_cost(code)
+        lines = [f"🏠 **Подтверждение: переезд, {x['title']}**", "",
+                 f"Аренда: {money(x['rent'])}/сут. (сейчас {money(cur['rent'])})",
+                 f"Планка счастья: {x['base']:.0f}% (сейчас {cur['base']:.0f}%)",
+                 f"Сон ×{x['sleep']:.2f}, лечение ×{x['heal']:.2f}",
+                 f"Холодильник: {x['fridge']} слотов (сейчас {cur['fridge']})",
+                 f"Стоимость переезда: {money(total)}"]
+    money_line = f"💰 У вас {money(p.money)}"
+    if total and p.money >= total:
+        money_line += f" → после: {money(p.money - total)}"
+    lines += ["", money_line]
+    why = L.pick_problem(p, now, tz)
+    lines.append(f"🚫 Сейчас нельзя: {why}" if why else "Деньги спишутся только после подтверждения.")
     return "\n".join(lines)
 
 def buy_confirm_text(p) -> str:
@@ -327,23 +500,6 @@ def buy_confirm_text(p) -> str:
         lines.append("Деньги спишутся только после нажатия «Купить».")
     return "\n".join(lines)
 
-def ent_text(p) -> str:
-    lines = ["🎭 **Развлечения**", f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%",
-             f"Первые {R.DIM_TIERS[0][0]:.0f} ч одного занятия за сутки дают полный эффект, "
-             "дальше отдача падает.", ""]
-    for code, e in R.ENTERTAINMENT.items():
-        used_h = p.day_ent.get(code, 0) * R.QUANTUM_MINUTES / 60
-        cost = "бесплатно" if not e["cost"] else f"{e['cost']} м./ч"
-        eff = f"счастье {e['happy']:+g}/ч"
-        if e["health"]:
-            eff += f", здоровье {e['health']:+g}/ч"
-        if e["energy"]:
-            eff += f", энергия {e['energy']:+g}/ч"
-        used = f" · сегодня уже {used_h:g} ч" if used_h else ""
-        lines.append(f"• **{e['title']}** — {cost} · {eff}{used}")
-    lines += ["", f"Начать можно при энергии не ниже {R.LEISURE_MIN_ENERGY:.0f}%."]
-    return "\n".join(lines)
-
 def hospital_text(p) -> str:
     lines = ["🏥 **Больница**",
              f"Принудительное лечение (при здоровье ниже {R.HEALTH_HOSPITAL:.0f}%) проходит само. "
@@ -359,53 +515,6 @@ def hospital_text(p) -> str:
                 lines.append(f"• {c['title']} — {money(c['cost'])}: {buff_desc(kind, c['power'])}, "
                              f"{c['hours']} ч, занятие {c['lesson']} ч")
     lines += ["", "Один эффект каждого вида: более сильный заменяет слабый, тот же курс продлевает срок."]
-    return "\n".join(lines)
-
-def fridge_text(p) -> str:
-    items = [f"{R.INGREDIENTS[c]['title']} {L.amount_text(c, n)}"
-             for c, n in p.fridge.items() if c in R.INGREDIENTS]
-    head = f"🧊 **Холодильник** ({len(p.fridge)} из {R.FRIDGE_SLOTS} слотов): "
-    return head + ("; ".join(items) if items else "пусто")
-
-def kitchen_text(p) -> str:
-    lvl, left = L.cook_progress(p.cook_xp)
-    pk = L.cook_perks(lvl)
-    em = L.tier_mult(R.COOK_EFFECT_TIERS, p.day_meals)
-    xm = L.tier_mult(R.COOK_XP_TIERS, p.day_meals)
-    lvl_line = f"👨‍🍳 **Повар:** уровень {lvl} из {R.COOK_MAX_LEVEL}"
-    if left is not None:
-        lvl_line += f" (до следующего: {left:.1f} опыта)".replace(".", ",")
-    lines = ["🍳 **Кухня**", lvl_line,
-             f"Время готовки ×{pk['time']:.2f}, сытность и радость ×{pk['boost']:.2f}",
-             fridge_text(p),
-             f"Блюд приготовлено сегодня: {p.day_meals}. Следующее даст {em * 100:.0f}% эффекта "
-             f"и {xm * 100:.0f}% опыта.", ""]
-    for code, r in R.RECIPES.items():
-        plan = L.cook_plan(p, code)
-        mark = "❌" if L.missing_ingredients(p, code) else "✅"
-        need = ", ".join(f"{R.INGREDIENTS[i]['title'].lower()} {L.amount_text(i, n)}"
-                         for i, n in r["items"].items())
-        lines.append(f"{mark} **{r['title']}** — {plan['quanta'] * R.QUANTUM_MINUTES} мин · "
-                     f"⚡+{plan['energy']:.0f} 😊+{plan['happy']:.0f} · {need}")
-    lines += ["", f"Готовить можно дома, когда вы свободны (энергия не ниже {R.COOK_MIN_ENERGY:.0f}%). "
-                  "Прервать готовку нельзя; сорвать её может только больница (продукты пропадут). "
-                  "Блюдо съедается сразу."]
-    return "\n".join(lines)
-
-def housing_text(p, now: datetime, tz) -> str:
-    h = R.HOUSING[p.housing]
-    lines = ["🏠 **Жильё**",
-             f"Сейчас: {h['title']} — {money(h['rent'])}/сут., счастье тянется к {h['base']:.0f}%.", ""]
-    for code, x in R.HOUSING.items():
-        mark = "▶ " if code == p.housing else "• "
-        lines.append(f"{mark}**{x['title']}** — {money(x['rent'])}/сут. · планка счастья {x['base']:.0f}% · "
-                     f"сон ×{x['sleep']:.2f}, лечение сном ×{x['heal']:.2f}")
-    lines += ["", f"Переезд стоит {R.HOUSING_MOVE_DAYS} суток аренды нового жилья; "
-                  f"чаще раза в {R.HOUSING_MOVE_COOLDOWN_HOURS} ч переезжать нельзя."]
-    if p.last_move:
-        until = p.last_move + timedelta(hours=R.HOUSING_MOVE_COOLDOWN_HOURS)
-        if now < until:
-            lines.append(f"Следующий переезд {ts(until)}.")
     return "\n".join(lines)
 
 # ---------- Рынок вакансий ----------
@@ -499,29 +608,6 @@ def edu_unlocks(code: str) -> str:
     """Какие профессии требуют эту программу."""
     return ", ".join(pr["title"] for pr in R.PROFESSIONS.values() if code in pr["edu"])
 
-def edu_text(p) -> str:
-    lines = ["🎓 **Образование**",
-             "Учёба идёт по часам, оплата списывается по минутам, пока вы учитесь. Закончить можно в любой "
-             "момент: штрафов нет, прогресс сохраняется. Если кончатся деньги или силы, занятие прервётся само.",
-             f"💰 {money(p.money)} · ⚡ {p.energy:.0f}%", ""]
-    for code, e in R.EDUCATION.items():
-        if code in p.education:
-            lines.append(f"✅ **{e['title']}** — получено")
-            continue
-        need_min = e["hours"] * 60
-        done = min(need_min, p.edu_progress.get(code, 0))
-        base = (f"**{e['title']}** — {e['hours']} ч · {e['fee']} м./ч "
-                f"(≈ {money(e['hours'] * e['fee'])} всего)")
-        unlocks = edu_unlocks(code)
-        tail = f" · нужно для: {unlocks}" if unlocks else ""
-        missing = L.edu_missing(p, code)
-        if missing:
-            lines.append(f"🔒 {base} · сначала: {', '.join(missing)}{tail}")
-        else:
-            prog = f" · пройдено {done / 60:.1f} из {e['hours']} ч ({done * 100 // need_min}%)" if done else ""
-            lines.append(f"📖 {base}{prog}{tail}")
-    return "\n".join(lines)
-
 def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
            jobs=None, vac=None, can: bool = False) -> str:
     """Полный текст сообщения панели для экрана screen."""
@@ -553,6 +639,8 @@ def render(screen: str, p, now: datetime, tz, events: list, note: str = "",
         text = venue_text(p)
     elif screen == "buy_confirm" and p.venue and p.buy_item:
         text = buy_confirm_text(p)
+    elif screen == "pick" and p.pick_kind:
+        text = pick_text(p, now, tz)
     elif screen == "ent":
         text = ent_text(p)
     elif screen == "kitchen":

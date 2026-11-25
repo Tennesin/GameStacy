@@ -99,8 +99,7 @@ class WorkerController:
             await interaction.followup.send(text, view=view, ephemeral=True)   # панель недоступна: покажем скрыто
 
     async def _process(self, interaction: discord.Interaction, action: str, value):
-        """Выполняет действие под блокировкой.
-        Возвращает (экран, текст панели, элементы, причина провала или None)."""
+        """Выполняет действие под блокировкой."""
         uid, gid = interaction.user.id, interaction.guild_id
         async with self.locks[(gid, uid)]:
             # Внутри блока нет await: подключение не вытеснится из кэша, а клики не перемешаются
@@ -110,6 +109,7 @@ class WorkerController:
             events = L.catch_up(p, now, TZ)
             try:
                 screen, note, ok = self._apply(store, p, action, value, now, events)
+                self._track_screen(p, screen)
                 ctx = self._context(store, screen, p, now)
                 if screen in CONFIRM_YES:
                     store.con.rollback()    # окно подтверждения ничего не меняет: события не «съедаем»
@@ -124,6 +124,16 @@ class WorkerController:
         text = render(screen, p, now, TZ, events, note if ok else "", **ctx)
         return screen, text, build_specs(screen, p, **ctx), problem
 
+    @staticmethod
+    def _track_screen(p: L.Player, screen: str):
+        """Запоминает, какой постраничный список открыт."""
+        if screen in L.PAGED_SCREENS:
+            if p.list_screen != screen:
+                p.page = 0
+            p.list_screen = screen
+        elif screen not in ("pick", "buy_confirm"):
+            p.list_screen = None
+
     def _context(self, store, screen: str, p: L.Player, now) -> dict:
         """Данные рынка вакансий для отрисовки экрана."""
         ts = int(now.timestamp())
@@ -135,8 +145,7 @@ class WorkerController:
         return {}
 
     def _apply(self, store, p: L.Player, action: str, value, now, events: list) -> tuple:
-        """Выполняет действие над игроком. Возвращает (экран, пояснение, успех).
-        успех=False: пояснение - причина провала, оно покажется скрытым сообщением."""
+        """Выполняет действие над игроком."""
         ts = int(now.timestamp())
         if p.frozen_at is not None:
             if action == "unfreeze":
@@ -146,21 +155,32 @@ class WorkerController:
                 return "status", "", True
             return "status", "Игра заморожена: сначала разморозьте её.", False
 
-        # В магазине можно только покупать и уходить
+        # В магазине можно только покупать, листать товары и уходить
         if p.venue and action not in ("status", "refresh", "buy", "buy_qty", "buy_do", "buy_back",
-                                      "venue_leave"):
+                                      "venue_leave", "page_prev", "page_next"):
             if action in ("market", "menu", "leisure", "menu_refresh"):
                 return "venue", "", True
             return "venue", "Сначала выйдите из магазина.", False
 
         if action in ("menu", "career", "leisure", "market", "ent", "housing", "edu", "kitchen"):
+            L.clear_pick(p)
             return action, "", True
         if action == "nav_hosp":
+            L.clear_pick(p)
             return "hospital", "", True
         if action == "menu_refresh":
             return "menu", "", True
         if action in ("status", "refresh"):
             return "status", "", True
+
+        # ----- листание страниц -----
+        if action in ("page_prev", "page_next"):
+            scr = p.list_screen
+            if scr not in L.PAGED_SCREENS:
+                return "status", "", True
+            _chunk, page, pages = L.page_slice(L.screen_items(p, scr), scr, p.page)
+            p.page = max(0, min(pages - 1, page + (1 if action == "page_next" else -1)))
+            return scr, "", True
 
         # ----- рынок (магазины) -----
         if action in ("go_food", "go_pharm", "go_super"):
@@ -186,39 +206,44 @@ class WorkerController:
         if action == "buy_back":                            # отмена: ничего не куплено, деньги целы
             p.buy_item = None
             return ("venue" if p.venue else "status"), "", True
-            return "venue", "", True
         if action == "venue_leave":
             ok, msg = L.leave_venue(p)
             return "status", msg, ok
 
-        # ----- досуг, больница, жильё -----
-        if action == "ent_go":
+        # ----- выбор с подтверждением: досуг, учёба, курсы, готовка, переезд -----
+        if action in ("ent_go", "edu_go"):                  # значение: «код» (или старое «код:часы»)
+            kind = "ent" if action == "ent_go" else "edu"
             code, _, h = (value or "").partition(":")
-            if not h.isdigit():
-                return "ent", "Не удалось понять выбор.", False
-            ok, msg = L.start_leisure(p, code, int(h))
-            return ("status" if ok else "ent"), msg, ok
+            ok, msg = L.set_pick(p, kind, code, int(h) if h.isdigit() else 0)
+            return ("pick" if ok else L.PICK_BACK[kind]), msg, ok
+        if action in ("course_go", "cook_go", "house_go"):
+            kind = {"course_go": "course", "cook_go": "cook", "house_go": "house"}[action]
+            ok, msg = L.set_pick(p, kind, value or "")
+            return ("pick" if ok else L.PICK_BACK[kind]), msg, ok
+        if action == "dur_set":
+            if not p.pick_kind:
+                return "leisure", "Сначала выберите вариант.", False
+            if value and value.isdigit():
+                L.set_pick_hours(p, int(value))
+            return "pick", "", True
+        if action == "pick_do":
+            if not p.pick_kind:
+                return "leisure", "Сначала выберите вариант.", False
+            ok, msg = L.pick_start(p, now, TZ)
+            if ok:
+                L.clear_pick(p)
+                return "status", msg, True
+            return "pick", msg, False                       # окно остаётся, причина - скрытым сообщением
+        if action == "pick_back":
+            kind = p.pick_kind
+            L.clear_pick(p)
+            return L.PICK_BACK.get(kind, "leisure"), "", True
+
+        # ----- досуг и учёба: завершение -----
         if action == "stop_leisure":
             ok, msg, evs = L.stop_leisure(p, TZ)
             events.extend(evs)
             return "status", msg, ok
-        if action == "course_go":
-            ok, msg = L.start_course(p, value or "")
-            return ("status" if ok else "hospital"), msg, ok
-        if action == "cook_go":
-            ok, msg = L.start_cook(p, value or "")
-            return ("status" if ok else "kitchen"), msg, ok
-        if action == "house_go":
-            ok, msg = L.move_housing(p, value or "", now, TZ)
-            return ("status" if ok else "housing"), msg, ok
-
-        # ----- образование -----
-        if action == "edu_go":
-            code, _, h = (value or "").partition(":")
-            if not h.isdigit():
-                return "edu", "Не удалось понять выбор.", False
-            ok, msg = L.start_study(p, code, int(h))
-            return ("status" if ok else "edu"), msg, ok
         if action == "stop_study":
             ok, msg, evs = L.stop_study(p, TZ)
             events.extend(evs)

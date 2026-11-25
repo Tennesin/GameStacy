@@ -30,10 +30,14 @@ LOBBY_TIMEOUT_SECONDS = 100
 # Подъём сообщения игры вниз канала
 BUMP_ENABLED = True        # False — функция выключена
 BUMP_AFTER_MESSAGES = 3    # сколько чужих сообщений под табло вызывают переотправку
-BUMP_LOOKAHEAD = 20        # сколько сообщений под табло просматривать (свои тоже попадают в выборку)
+BUMP_LOOKAHEAD = 20        # сколько сообщений под табло просматривать
+# Рулетка ролей: {ID сервера: [ID роли, ID роли, ...]}
+ROLES = {
+    # 123456789012345678: [111111111111111111, 222222222222222222, 333333333333333333],
+}
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
 GAMES = [
-    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo", "games.worker"
+    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo", "games.worker",
 ]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

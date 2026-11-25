@@ -52,6 +52,9 @@ ALL_SPECS = [
     Spec("buy_do", "🛒 Купить", SUCCESS, 3), Spec("buy_back", "◀ Назад", SECONDARY, 3),
     Spec("buy_qty", "Сколько продуктов?", None, 4, "select"),
     Spec("cook_go", "Что приготовить?", None, 4, "select"),
+    Spec("dur_set", "Сколько часов?", None, 3, "select"),
+    Spec("pick_do", "▶ Начать", SUCCESS, 3), Spec("pick_back", "◀ Назад", SECONDARY, 3),
+    Spec("page_prev", "⬅ Пред. стр.", SECONDARY, 3), Spec("page_next", "След. стр. ➡", SECONDARY, 3),
 ]
 
 def sleep_opts(p) -> list:
@@ -66,9 +69,21 @@ def sleep_opts(p) -> list:
         opts.append((label, value, desc[:100]))
     return opts
 
-def venue_opts(p) -> list:
+PICK_DO_LABEL = {"ent": "🎭 Пойти", "edu": "📚 Начать учёбу", "course": "🎓 Записаться",
+                 "cook": "🍳 Готовить", "house": "🏠 Переехать"}
+
+def pager_specs(page: int, pages: int, row: int) -> list:
+    """Кнопки листания (только те, что имеют смысл на этой странице)."""
+    specs = []
+    if page > 0:
+        specs.append(Spec("page_prev", "⬅ Пред. стр.", SECONDARY, row))
+    if page < pages - 1:
+        specs.append(Spec("page_next", "След. стр. ➡", SECONDARY, row))
+    return specs
+
+def venue_opts(p, chunk: list) -> list:
     opts = []
-    for code, item in L.goods_of(p.venue):
+    for code, item in chunk:
         price = L.good_price(p.venue, code)
         if code in R.INGREDIENTS:
             have = L.held(p, code)
@@ -81,14 +96,37 @@ def venue_opts(p) -> list:
                      code, f"{T.effect_text(item)} · осталось {left}"[:100]))
     return opts
 
-def qty_opts() -> list:
-    return [("1 упаковка (яйца: 6 шт.)", "1", "Для продуктов: одна упаковка"),
-            ("2 упаковки (яйца: 12 шт.)", "2", "Для продуктов: две упаковки"),
-            ("Максимум в слот", "max", "Докупить столько, сколько влезет в слот")]
-
-def cook_opts(p) -> list:
+def ent_opts(p, chunk: list) -> list:
     opts = []
-    for code, r in R.RECIPES.items():
+    for code, e in chunk:
+        hours = e["hours"]
+        span = f"{hours[0]} ч" if len(hours) == 1 else f"{hours[0]}–{hours[-1]} ч"
+        cost = "бесплатно" if not e["cost"] else f"{e['cost']} м./ч"
+        mult = L.dim_mult(p.day_ent.get(code, 0), 60 // R.QUANTUM_MINUTES)
+        opts.append((f"{e['title']} · {cost}"[:100], code,
+                     f"счастье {e['happy'] * mult:+.1f}/ч (отдача ×{mult:.2f}) · {span}"[:100]))
+    return opts
+
+def edu_opts(p, chunk: list) -> list:
+    """Только то, что можно начать (не получено и выполнены условия)."""
+    opts = []
+    for code, e in chunk:
+        if code in p.education or L.edu_missing(p, code):
+            continue
+        done = p.edu_progress.get(code, 0)
+        pct = min(100, done * 100 // (e["hours"] * 60))
+        opts.append((f"{e['title']} · {e['fee']} м./ч"[:100], code,
+                     f"пройдено {pct}% · всего {e['hours']} ч"[:100]))
+    return opts
+
+def cook_opts(p, chunk: list) -> list:
+    opts = []
+    have_lvl = L.cook_level(p.cook_xp)
+    for code, r in chunk:
+        need = r.get("lvl", 0)
+        if have_lvl < need:
+            opts.append((f"🔒 {r['title']}"[:100], code, f"откроется на уровне Повара {need}"))
+            continue
         plan = L.cook_plan(p, code)
         miss = L.missing_ingredients(p, code)
         if miss:
@@ -99,38 +137,38 @@ def cook_opts(p) -> list:
                      code, desc[:100]))
     return opts
 
-def ent_opts(p) -> list:
+def house_opts(p) -> list:
+    return [(f"{h['title']} · {h['rent']} м./сут."[:100], code,
+             f"счастье → {h['base']:.0f}% · холодильник {h['fridge']} · переезд {L.move_cost(code)} м."[:100])
+            for code, h in R.HOUSING.items() if code != p.housing]
+
+def pick_hours_opts(p) -> list:
+    """Варианты длительности в окне подтверждения (досуг и учёба)."""
+    kind, code = p.pick_kind, p.pick_code
     opts = []
-    for code, e in R.ENTERTAINMENT.items():
-        for h in e["hours"]:
-            q = h * 60 // R.QUANTUM_MINUTES
-            mult = L.dim_mult(p.day_ent.get(code, 0), q)
+    for h in L.pick_hours_options(kind, code):
+        if kind == "ent":
+            e = R.ENTERTAINMENT[code]
+            mult = L.dim_mult(p.day_ent.get(code, 0), h * 60 // R.QUANTUM_MINUTES)
             cost = "бесплатно" if not e["cost"] else f"{e['cost'] * h} м."
-            opts.append((f"{e['title']} · {h} ч · {cost}"[:100], f"{code}:{h}",
+            opts.append((f"{h} ч · {cost}", str(h),
                          f"счастье {e['happy'] * mult:+.1f}/ч (отдача ×{mult:.2f})"[:100]))
+        else:
+            e = R.EDUCATION[code]
+            real = min(h, L.edu_left_min(p, code) / 60)
+            opts.append((f"до {h} ч · ≈{int(e['fee'] * real)} м.", str(h),
+                         f"{e['fee']} м./ч, списывается по минутам"))
     return opts
+
+def qty_opts() -> list:
+    return [("1 упаковка (яйца: 6 шт.)", "1", "Для продуктов: одна упаковка"),
+            ("2 упаковки (яйца: 12 шт.)", "2", "Для продуктов: две упаковки"),
+            ("Максимум в слот", "max", "Докупить столько, сколько влезет в слот")]
 
 def course_opts() -> list:
     return [(f"{c['title']} · {c['cost']} м."[:100], code,
              f"{T.buff_desc(c['kind'], c['power'])} · {c['hours']} ч · занятие {c['lesson']} ч"[:100])
             for code, c in R.COURSES.items()]
-
-def house_opts(p) -> list:
-    return [(f"{h['title']} · {h['rent']} м./сут."[:100], code,
-             f"счастье → {h['base']:.0f}% · переезд {L.move_cost(code)} м."[:100])
-            for code, h in R.HOUSING.items() if code != p.housing]
-
-def edu_opts(p) -> list:
-    opts = []
-    for code, e in R.EDUCATION.items():
-        if code in p.education or L.edu_missing(p, code):
-            continue
-        done = p.edu_progress.get(code, 0)
-        pct = min(100, done * 100 // (e["hours"] * 60))
-        for h in R.EDU_SESSION_HOURS:
-            opts.append((f"{e['title']} · до {h} ч · ≈{e['fee'] * h} м."[:100], f"{code}:{h}",
-                         f"пройдено {pct}% · {e['fee']} м./ч"[:100]))
-    return opts
 
 def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> list:
     """Какие элементы показывать на экране."""
@@ -142,9 +180,10 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return [Spec("jobs", "🔨 Работа", PRIMARY, 0), Spec("myjob", "📑 Моя работа", PRIMARY, 0),
                 Spec("edu", "🎓 Образование", PRIMARY, 0), Spec("menu", "◀ Назад", SECONDARY, 0)]
     if screen == "edu":
-        opts = edu_opts(p)
+        chunk, page, pages = L.page_slice(L.screen_items(p, "edu"), "edu", p.page)
+        opts = edu_opts(p, chunk)
         specs = [Spec("edu_go", "Чему учиться?", None, 0, "select", opts)] if opts else []
-        return specs + [Spec("career", "◀ Назад", SECONDARY, 1)]
+        return specs + pager_specs(page, pages, 1) + [Spec("career", "◀ Назад", SECONDARY, 1)]
     if screen == "myjob":
         specs = []
         if p is not None and p.job is not None:
@@ -160,8 +199,10 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return [Spec("go_food", "🥖 Продукты", PRIMARY, 0), Spec("go_pharm", "💊 Аптека", PRIMARY, 0),
                 Spec("go_super", "🛍 Супермаркет", PRIMARY, 0), Spec("leisure", "◀ Назад", SECONDARY, 1)]
     if screen == "venue" and p is not None and p.venue:
-        return [Spec("buy", "Что купить?", None, 0, "select", venue_opts(p)),
-                Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 1)]
+        chunk, page, pages = L.page_slice(L.screen_items(p, "venue"), "venue", p.page)
+        return ([Spec("buy", "Что купить?", None, 0, "select", venue_opts(p, chunk))]
+                + pager_specs(page, pages, 1)
+                + [Spec("venue_leave", "🚪 Уйти из магазина", SECONDARY, 1)])
     if screen == "buy_confirm" and p is not None and p.venue and p.buy_item:
         specs, row = [], 0
         if p.buy_item in R.INGREDIENTS:
@@ -170,11 +211,21 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
         return specs + [Spec("buy_do", "🛒 Купить", SUCCESS, row),
                         Spec("buy_back", "◀ Назад", SECONDARY, row)]
     if screen == "ent":
-        return [Spec("ent_go", "Куда пойти?", None, 0, "select", ent_opts(p)),
-                Spec("leisure", "◀ Назад", SECONDARY, 1)]
+        chunk, page, pages = L.page_slice(L.screen_items(p, "ent"), "ent", p.page)
+        return ([Spec("ent_go", "Куда пойти?", None, 0, "select", ent_opts(p, chunk))]
+                + pager_specs(page, pages, 1) + [Spec("leisure", "◀ Назад", SECONDARY, 1)])
     if screen == "kitchen":
-        return [Spec("cook_go", "Что приготовить?", None, 0, "select", cook_opts(p)),
-                Spec("leisure", "◀ Назад", SECONDARY, 1)]
+        chunk, page, pages = L.page_slice(L.screen_items(p, "kitchen"), "kitchen", p.page)
+        return ([Spec("cook_go", "Что приготовить?", None, 0, "select", cook_opts(p, chunk))]
+                + pager_specs(page, pages, 1) + [Spec("leisure", "◀ Назад", SECONDARY, 1)])
+    if screen == "pick" and p is not None and p.pick_kind:
+        specs = []
+        opts = pick_hours_opts(p)
+        if len(opts) > 1:
+            specs.append(Spec("dur_set", f"Длительность: {p.pick_hours} ч", None, 0, "select", opts))
+        row = 1 if specs else 0
+        return specs + [Spec("pick_do", PICK_DO_LABEL.get(p.pick_kind, "▶ Начать"), SUCCESS, row),
+                        Spec("pick_back", "◀ Назад", SECONDARY, row)]
     if screen == "hospital":
         return [Spec("course_go", "Выберите курс", None, 0, "select", course_opts()),
                 Spec("leisure", "◀ Назад", SECONDARY, 1)]

@@ -50,7 +50,9 @@ def prof_weight(code: str) -> float:
     """Чем ниже требования к образованию, тем чаще профессия попадает на рынок."""
     levels = [R.EDUCATION[e]["level"] for e in R.PROFESSIONS[code]["edu"]]
     courses = sum(1 for lv in levels if lv == 0)
-    return R.EDU_WEIGHTS[max(levels + [0])] * (R.COURSE_WEIGHT_MULT ** courses)
+    top = max(levels + [0])
+    base = R.EDU_WEIGHTS.get(top, R.EDU_WEIGHTS[max(R.EDU_WEIGHTS)])
+    return base * (R.COURSE_WEIGHT_MULT ** courses) * R.PROFESSIONS[code].get("weight", 1.0)
 
 def pick_profession(kind: str, rng: random.Random) -> str:
     codes = [c for c, p in R.PROFESSIONS.items() if kind in p["kinds"]]

@@ -39,12 +39,14 @@ HAPPY_MULT_MAX = 1.1              # при 100% (при 50% равен 1.0)
 
 # ---------- Жильё и питание ----------
 HOUSING = {
-    "bunk": {"title": "Койко-место", "rent": 50, "base": 40.0, "sleep": 0.85, "heal": 0.8},
-    "room": {"title": "Комната", "rent": 85, "base": 50.0, "sleep": 1.0, "heal": 1.0},
-    "studio": {"title": "Студия", "rent": 140, "base": 55.0, "sleep": 1.07, "heal": 1.1},
-    "flat": {"title": "Квартира", "rent": 210, "base": 60.0, "sleep": 1.15, "heal": 1.2},
-    "loft": {"title": "Лофт", "rent": 520, "base": 68.0, "sleep": 1.25, "heal": 1.35},
-    "penthouse": {"title": "Пентхаус", "rent": 1200, "base": 76.0, "sleep": 1.35, "heal": 1.5},
+    "bunk": {"title": "Койко-место", "rent": 50, "base": 40.0, "sleep": 0.85, "heal": 0.8, "fridge": 6},
+    "dorm": {"title": "Общежитие", "rent": 65, "base": 45.0, "sleep": 0.92, "heal": 0.9, "fridge": 8},
+    "room": {"title": "Комната", "rent": 85, "base": 50.0, "sleep": 1.0, "heal": 1.0, "fridge": 10},
+    "studio": {"title": "Студия", "rent": 140, "base": 55.0, "sleep": 1.07, "heal": 1.1, "fridge": 12},
+    "flat": {"title": "Квартира", "rent": 210, "base": 60.0, "sleep": 1.15, "heal": 1.2, "fridge": 14},
+    "loft": {"title": "Лофт", "rent": 520, "base": 68.0, "sleep": 1.25, "heal": 1.35, "fridge": 16},
+    "house": {"title": "Дом", "rent": 800, "base": 72.0, "sleep": 1.3, "heal": 1.4, "fridge": 18},
+    "penthouse": {"title": "Пентхаус", "rent": 1200, "base": 76.0, "sleep": 1.35, "heal": 1.5, "fridge": 20},
 }
 FOOD = {
     "regular": {"title": "Обычное", "cost": 50},
@@ -93,6 +95,8 @@ FREEZE_COOLDOWN_DAYS = 7          # после разморозки повтор
 # ---------- Интерфейс ----------
 SLEEP_CHOICES_HOURS = (1, 2, 4, 6, 8)
 EVENTS_SHOWN = 6                  # сколько событий «пока вас не было» показывать
+# Сколько пунктов на одной странице постраничных списков (список выбора вмещает не больше 25)
+PAGE_SIZES = {"venue": 8, "kitchen": 6, "ent": 7, "edu": 6}
 
 # ---------- Образование (ступени и курсы) ----------
 # level: вес в генераторе вакансий; hours: сколько часов учёбы до получения;
@@ -103,6 +107,9 @@ EDUCATION = {
     "higher": {"title": "Высшее образование", "level": 3, "hours": 48, "fee": 100, "need": ("college",)},
     "course_acc": {"title": "Курс «Бухгалтерия»", "level": 0, "hours": 18, "fee": 65, "need": ("school",)},
     "course_med": {"title": "Курс «Медицина»", "level": 0, "hours": 24, "fee": 125, "need": ("college",)},
+    "course_driver": {"title": "Курс «Вождение»", "level": 0, "hours": 14, "fee": 55, "need": ("school",)},
+    "course_weld": {"title": "Курс «Сварка»", "level": 0, "hours": 20, "fee": 70, "need": ("school",)},
+    "course_prog": {"title": "Курс «Программирование»", "level": 0, "hours": 30, "fee": 90, "need": ("college",)},
 }
 EDU_SESSION_HOURS = (1, 2, 4)     # длительность одного занятия на выбор
 EDU_MIN_ENERGY = 25.0             # меньше энергии - на занятие не прийти
@@ -135,6 +142,27 @@ PROFESSIONS = {
     "doctor": {"title": "Врач", "edu": ("higher", "course_med"), "min_rep": 75, "kinds": ("perm",),
                "wage": 190, "shift": (6, 12), "energy": -6.5, "health": -0.3, "happy": -0.9,
                "commute": (15, 25), "fare": 12, "off": (0, 1)},
+    "janitor": {"title": "Дворник", "edu": (), "min_rep": 0, "kinds": ("once", "perm"), "wage": 36,
+                "shift": (3, 6), "energy": -3.0, "health": -0.3, "happy": -0.3,
+                "commute": (5, 10), "fare": 0, "off": (1, 2), "weight": 0.5},
+    "guard": {"title": "Охранник", "edu": ("school",), "min_rep": 8, "kinds": ("perm",), "wage": 52,
+              "shift": (8, 12), "energy": -2.5, "health": -0.1, "happy": -0.8,
+              "commute": (10, 25), "fare": 8, "off": (2, 3)},
+    "driver": {"title": "Водитель", "edu": ("school", "course_driver"), "min_rep": 15,
+               "kinds": ("once", "perm"), "wage": 62, "shift": (4, 10), "energy": -4.0, "health": -0.2,
+               "happy": -0.3, "commute": (10, 20), "fare": 0, "off": (1, 2)},
+    "welder": {"title": "Сварщик", "edu": ("college", "course_weld"), "min_rep": 30,
+               "kinds": ("once", "perm"), "wage": 92, "shift": (4, 10), "energy": -6.0, "health": -0.9,
+               "happy": -0.2, "commute": (15, 30), "fare": 10, "off": (1, 2)},
+    "nurse": {"title": "Медсестра", "edu": ("college", "course_med"), "min_rep": 45, "kinds": ("perm",),
+              "wage": 100, "shift": (6, 12), "energy": -5.0, "health": -0.3, "happy": -0.6,
+              "commute": (15, 30), "fare": 10, "off": (1, 2)},
+    "teacher": {"title": "Учитель", "edu": ("higher",), "min_rep": 60, "kinds": ("perm",), "wage": 105,
+                "shift": (4, 8), "energy": -3.5, "health": -0.1, "happy": 0.1,
+                "commute": (15, 30), "fare": 10, "off": (2, 2), "weekend": True},
+    "programmer": {"title": "Программист", "edu": ("higher", "course_prog"), "min_rep": 65,
+                   "kinds": ("perm",), "wage": 150, "shift": (4, 10), "energy": -3.0, "health": -0.2,
+                   "happy": 0.3, "commute": (5, 10), "fare": 0, "off": (1, 2)},
 }
 
 # ---------- Рынок вакансий ----------
@@ -191,11 +219,16 @@ VENUES = {
 # energy / health / happy: мгновенное изменение показателя; limit: покупок за сутки
 GOODS = {
     "snack": {"title": "Перекус", "cat": "food", "price": 12, "energy": 3},
+    "sandwich": {"title": "Бутерброд", "cat": "food", "price": 20, "energy": 5, "happy": 1},
+    "coffee": {"title": "Кофе", "cat": "food", "price": 22, "energy": 5, "happy": 1},
+    "juice": {"title": "Сок", "cat": "food", "price": 24, "energy": 2, "health": 1, "happy": 1},
     "lunch": {"title": "Обед", "cat": "food", "price": 40, "energy": 8, "happy": 2},
     "choc": {"title": "Шоколад", "cat": "food", "price": 18, "energy": 1, "happy": 3},
     "fruit": {"title": "Фрукты", "cat": "food", "price": 30, "energy": 2, "health": 1},
     "energy_drink": {"title": "Энергетик", "cat": "food", "price": 120, "energy": 15, "health": -3, "limit": 2},
     "vitamins": {"title": "Витамины", "cat": "pharm", "price": 25, "health": 2},
+    "bandage": {"title": "Бинты", "cat": "pharm", "price": 30, "health": 4, "limit": 3},
+    "painkiller": {"title": "Обезболивающее", "cat": "pharm", "price": 55, "health": 7, "happy": 1, "limit": 3},
     "medicine": {"title": "Лекарство", "cat": "pharm", "price": 60, "health": 10, "limit": 4},
     "strong_med": {"title": "Сильный препарат", "cat": "pharm", "price": 200, "health": 25, "limit": 2},
     "sedative": {"title": "Успокоительное", "cat": "pharm", "price": 45, "happy": 6, "limit": 3},
@@ -213,6 +246,14 @@ ENTERTAINMENT = {
     "gym": {"title": "Спортзал", "cost": 40, "hours": (1, 2), "energy": -5.0, "health": 1.2, "happy": 3.0},
     "spa": {"title": "СПА-салон", "cost": 350, "hours": (1, 2, 3), "energy": 3.0, "health": 1.5, "happy": 9.0},
     "concert": {"title": "Концерт", "cost": 500, "hours": (3,), "energy": -1.5, "health": 0.0, "happy": 11.0},
+    "library": {"title": "Библиотека", "cost": 10, "hours": (1, 2, 3), "energy": -0.5, "health": 0.0, "happy": 3.0},
+    "bowling": {"title": "Боулинг", "cost": 90, "hours": (1, 2), "energy": -2.0, "health": 0.3, "happy": 6.0},
+    "pool": {"title": "Бассейн", "cost": 70, "hours": (1, 2), "energy": -4.0, "health": 1.0, "happy": 4.0},
+    "fishing": {"title": "Рыбалка", "cost": 0, "hours": (2, 3, 4), "energy": -1.0, "health": 0.4, "happy": 3.5},
+    "theatre": {"title": "Театр", "cost": 300, "hours": (2, 3), "energy": -0.5, "health": 0.0, "happy": 9.5},
+    "bar": {"title": "Бар", "cost": 200, "hours": (1, 2, 3), "energy": 0.0, "health": -0.8, "happy": 7.0},
+    "amusement": {"title": "Парк аттракционов", "cost": 400, "hours": (3, 4), "energy": -3.0, "health": 0.0,
+                  "happy": 12.0},
 }
 
 # ---------- Больница: добровольные курсы ----------
@@ -222,12 +263,17 @@ COURSES = {
     "stamina_1": {"title": "Дыхательная гимнастика", "kind": "stamina", "cost": 300, "power": 0.08, "hours": 12, "lesson": 1},
     "stamina_2": {"title": "Йога", "kind": "stamina", "cost": 900, "power": 0.15, "hours": 24, "lesson": 2},
     "stamina_3": {"title": "Спортивная подготовка", "kind": "stamina", "cost": 2400, "power": 0.25, "hours": 48, "lesson": 3},
+    "stamina_4": {"title": "Марафонская подготовка", "kind": "stamina", "cost": 5000, "power": 0.35, "hours": 72,
+                  "lesson": 4},
     "learning_1": {"title": "Техника запоминания", "kind": "learning", "cost": 300, "power": 0.10, "hours": 12, "lesson": 1},
     "learning_2": {"title": "Скорочтение", "kind": "learning", "cost": 900, "power": 0.20, "hours": 24, "lesson": 2},
     "learning_3": {"title": "Интенсив «Фокус»", "kind": "learning", "cost": 2400, "power": 0.35, "hours": 48, "lesson": 3},
+    "learning_4": {"title": "Интенсив «Гений»", "kind": "learning", "cost": 5000, "power": 0.50, "hours": 72,
+                   "lesson": 4},
     "recovery_1": {"title": "Основы здорового сна", "kind": "recovery", "cost": 300, "power": 0.15, "hours": 12, "lesson": 1},
     "recovery_2": {"title": "Курс реабилитации", "kind": "recovery", "cost": 900, "power": 0.30, "hours": 24, "lesson": 2},
     "recovery_3": {"title": "Санаторная программа", "kind": "recovery", "cost": 2400, "power": 0.50, "hours": 48, "lesson": 3},
+    "recovery_4": {"title": "Курорт", "kind": "recovery", "cost": 5000, "power": 0.70, "hours": 72, "lesson": 4},
 }
 COURSE_ENERGY_RATE = -2.0         # энергия в час во время занятия
 COURSE_MIN_ENERGY = 25.0          # меньше энергии - на курс не пойти
@@ -250,6 +296,14 @@ INGREDIENTS = {
     "rice": {"title": "Рис", "cat": "ingr", "unit": "g", "pack": 1000, "price": 45, "slot": 3000},
     "chicken": {"title": "Курица", "cat": "ingr", "unit": "g", "pack": 1000, "price": 160, "slot": 2000},
     "sugar": {"title": "Сахар", "cat": "ingr", "unit": "g", "pack": 1000, "price": 40, "slot": 2000},
+    "pasta": {"title": "Макароны", "cat": "ingr", "unit": "g", "pack": 1000, "price": 30, "slot": 3000},
+    "buckwheat": {"title": "Гречка", "cat": "ingr", "unit": "g", "pack": 1000, "price": 38, "slot": 3000},
+    "butter": {"title": "Сливочное масло", "cat": "ingr", "unit": "g", "pack": 200, "price": 70, "slot": 1000},
+    "cheese": {"title": "Сыр", "cat": "ingr", "unit": "g", "pack": 500, "price": 110, "slot": 1500},
+    "beef": {"title": "Говядина", "cat": "ingr", "unit": "g", "pack": 1000, "price": 260, "slot": 2000},
+    "fish": {"title": "Рыба", "cat": "ingr", "unit": "g", "pack": 1000, "price": 190, "slot": 2000},
+    "apple": {"title": "Яблоки", "cat": "ingr", "unit": "g", "pack": 1000, "price": 40, "slot": 3000},
+    "beet": {"title": "Свёкла", "cat": "ingr", "unit": "g", "pack": 1000, "price": 15, "slot": 3000},
 }
 # minutes: время на 0 уровне повара; items: сколько чего нужно; energy/happy: эффект на 0 уровне; xp: опыт Повара
 RECIPES = {
@@ -265,6 +319,21 @@ RECIPES = {
               "items": {"chicken": 200, "cabbage": 300, "potato": 300, "carrot": 100, "onion": 100, "oil": 10}},
     "plov": {"title": "Плов", "minutes": 75, "energy": 25, "happy": 12, "xp": 8,
              "items": {"rice": 300, "chicken": 400, "carrot": 200, "onion": 150, "oil": 60}},
+    "porridge": {"title": "Гречневая каша", "minutes": 20, "energy": 9, "happy": 3, "xp": 3, "lvl": 0,
+                 "items": {"buckwheat": 200, "butter": 20}},
+    "mashed": {"title": "Картофельное пюре", "minutes": 30, "energy": 12, "happy": 4, "xp": 4, "lvl": 1,
+               "items": {"potato": 400, "butter": 30, "milk": 100}},
+    "pasta_chicken": {"title": "Макароны с курицей", "minutes": 35, "energy": 16, "happy": 6, "xp": 5, "lvl": 2,
+                      "items": {"pasta": 250, "chicken": 200, "oil": 15, "onion": 50}},
+    "cutlets": {"title": "Котлеты с гречкой", "minutes": 55, "energy": 19, "happy": 7, "xp": 6, "lvl": 3,
+                "items": {"beef": 300, "onion": 100, "eggs": 1, "flour": 30, "buckwheat": 200, "oil": 30}},
+    "fish_rice": {"title": "Рыба с рисом", "minutes": 45, "energy": 18, "happy": 8, "xp": 6, "lvl": 4,
+                  "items": {"fish": 300, "rice": 200, "onion": 50, "oil": 20}},
+    "borscht": {"title": "Борщ", "minutes": 70, "energy": 20, "happy": 9, "xp": 7, "lvl": 5,
+                "items": {"beef": 250, "beet": 200, "cabbage": 200, "potato": 250, "carrot": 100,
+                          "onion": 100, "oil": 20}},
+    "charlotte": {"title": "Шарлотка", "minutes": 60, "energy": 10, "happy": 14, "xp": 7, "lvl": 6,
+                  "items": {"apple": 400, "eggs": 3, "flour": 150, "sugar": 120}},
 }
 COOK_MIN_ENERGY = 20.0            # меньше энергии - готовить нельзя
 COOK_ENERGY_RATE = -1.5           # энергия в час во время готовки
