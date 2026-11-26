@@ -1,4 +1,5 @@
 """Кнопки симулятора рабочего."""
+import math
 from contextlib import suppress
 from typing import NamedTuple, Optional
 import discord
@@ -160,10 +161,20 @@ def pick_hours_opts(p) -> list:
                          f"{e['fee']} м./ч, списывается по минутам"))
     return opts
 
-def qty_opts() -> list:
-    return [("1 упаковка (яйца: 6 шт.)", "1", "Для продуктов: одна упаковка"),
-            ("2 упаковки (яйца: 12 шт.)", "2", "Для продуктов: две упаковки"),
-            ("Максимум в слот", "max", "Докупить столько, сколько влезет в слот")]
+def qty_opts(p) -> list:
+    """Варианты количества под выбранный продукт."""
+    code = p.buy_item
+    ing = R.INGREDIENTS[code]
+    unit = L.good_price(p.venue, code)
+    pack = ing["pack"]
+    opts = [(f"1 упаковка · {L.amount_text(code, pack)}", "1", f"{unit} м."),
+            (f"2 упаковки · {L.amount_text(code, 2 * pack)}", "2", f"{2 * unit} м.")]
+    gap = L.fill_amount(p, code)
+    if gap > 0:
+        price = math.ceil(unit * gap / pack)
+        opts.append((f"Дополнить слот · +{L.amount_text(code, gap)}", "fill",
+                     f"{price} м. · слот станет полным"))
+    return opts
 
 def course_opts() -> list:
     return [(f"{c['title']} · {c['cost']} м."[:100], code,
@@ -206,7 +217,7 @@ def build_specs(screen: str, p=None, jobs=None, vac=None, can: bool = False) -> 
     if screen == "buy_confirm" and p is not None and p.venue and p.buy_item:
         specs, row = [], 0
         if p.buy_item in R.INGREDIENTS:
-            specs.append(Spec("buy_qty", "Сколько продуктов?", None, 0, "select", qty_opts()))
+            specs.append(Spec("buy_qty", "Сколько продуктов?", None, 0, "select", qty_opts(p)))
             row = 1
         return specs + [Spec("buy_do", "🛒 Купить", SUCCESS, row),
                         Spec("buy_back", "◀ Назад", SECONDARY, row)]

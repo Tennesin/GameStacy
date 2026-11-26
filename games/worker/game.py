@@ -192,7 +192,7 @@ class WorkerController:
                 return "buy_confirm", msg, True
             return ("venue" if p.venue else "status"), msg, False
         if action == "buy_qty":                             # количество меняется в окне подтверждения
-            p.buy_qty = value if value in ("1", "2", "max") else "1"
+            p.buy_qty = value if value in ("1", "2", "fill") else "1"
             if p.venue and p.buy_item:
                 return "buy_confirm", "", True
             return ("venue" if p.venue else "status"), "", True

@@ -263,7 +263,14 @@ def market_text(p) -> str:
         lines.append(f"{v['emoji']} **{v['title']}**{extra}: " + ", ".join(names))
     return "\n".join(lines)
 
-QTY_LABELS = {"1": "1 упаковка (яйца: 6 шт.)", "2": "2 упаковки (яйца: 12 шт.)", "max": "максимум в слот"}
+def qty_label(code: str, mode: str, free: int) -> str:
+    """Подпись выбранного количества для окна подтверждения покупки."""
+    pack = R.INGREDIENTS[code]["pack"]
+    if mode == "fill":
+        return f"дополнить слот (+{L.amount_text(code, free)})"
+    if mode == "2":
+        return f"2 упаковки ({L.amount_text(code, 2 * pack)})"
+    return f"1 упаковка ({L.amount_text(code, pack)})"
 
 def venue_text(p) -> str:
     v = R.VENUES[p.venue]
@@ -472,15 +479,15 @@ def buy_confirm_text(p) -> str:
     lines = [f"🛒 **Подтверждение покупки** · {v['emoji']} {v['title']}", ""]
 
     if code in R.INGREDIENTS:
-        packs, _free = L.ingredient_offer(p, code)
-        total = unit * packs
+        amount, total, free = L.ingredient_offer(p, code)
+        mode = L.buy_mode(p, code)
         have = L.held(p, code)
         lines += [f"**{item['title']}** — {money(unit)} за упаковку ({L.amount_text(code, item['pack'])})",
                   f"У вас сейчас: {L.amount_text(code, have) if have else 'нет'} "
                   f"(слот вмещает до {L.amount_text(code, item['slot'])})",
-                  f"Количество: **{QTY_LABELS[p.buy_qty]}**"]
-        if packs > 0:
-            lines.append(f"Будет куплено: {L.amount_text(code, packs * item['pack'])} за {money(total)}")
+                  f"Количество: **{qty_label(code, mode, free)}**"]
+        if free > 0:
+            lines.append(f"Будет куплено: {L.amount_text(code, amount)} за {money(total)}")
     else:
         total = unit
         left = L.good_limit(code) - p.day_buys.get(code, 0)

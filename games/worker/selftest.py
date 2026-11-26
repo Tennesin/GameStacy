@@ -597,9 +597,12 @@ def test_kitchen():
     p = L.new_player(1, T0)
     p.money, p.venue = 1000, "food"
     assert L.buy(p, "eggs")[0] and p.bag == {"eggs": 6} and p.money == 1000 - 48
-    p.buy_qty = "max"
-    assert L.buy(p, "potato")[0] and p.bag["potato"] == 5000
-    assert not L.buy(p, "potato")[0]                                  # слот полон
+    assert L.buy(p, "potato")[0] and p.bag["potato"] == 1000           # слот занят частично
+    p.buy_qty = "fill"
+    assert L.buy(p, "potato")[0] and p.bag["potato"] == 5000           # дополнили ровно до полного слота
+    assert p.money == 1000 - 48 - 18 - 72                              # 18 м. за упаковку + 4 кг по 18 м./кг
+    assert not L.buy(p, "potato")[0]                                   # слот полон
+    assert L.buy_mode(p, "onion") == "1"                               # слот лука пуст: «дополнить» недоступно
     p.buy_qty = "1"
     for code in ("onion", "carrot", "cabbage", "tomato", "oil", "flour", "milk", "rice"):
         assert L.buy(p, code)[0], code
@@ -641,6 +644,15 @@ def test_kitchen():
     L.catch_up(q, at(16), TZ)
     assert q.day_meals == 0
     assert L.Player.restore(json.loads(json.dumps(q.snapshot()))).snapshot() == q.snapshot()
+
+    # «Дополнить слот» после готовки: остаток меньше упаковки
+    g = L.new_player(5, T0)
+    g.money, g.venue, g.buy_qty = 100, "food", "fill"
+    g.fridge = {"potato": 4600}                                       # не хватает 400 г, это меньше упаковки
+    assert L.ingredient_offer(g, "potato") == (400, 8, 400)           # ceil(18 * 400 / 1000) = 8
+    assert L.buy(g, "potato")[0] and g.bag["potato"] == 400 and g.money == 92
+    g.buy_qty = "1"
+    assert not L.buy(g, "potato")[0]                                  # слот теперь полон
     print("продукты и готовка: OK")
 
 def test_info():
@@ -729,7 +741,6 @@ def test_pick_flow():
     assert p.pick_hours == 3                                                # недопустимое игнорируется
     assert not L.set_pick(p, "ent", "нет_такого")[0]
     assert L.pick_problem(p, T0, TZ) == "" and p.act is None and p.money == 1000
-    assert L.L if False else True
     p.money = 0
     L.set_pick(p, "ent", "cinema")
     assert L.pick_problem(p, T0, TZ) != "" and p.money == 0                 # причина найдена, игрок цел
@@ -773,14 +784,16 @@ def test_paging_and_levels():
     # холодильник зависит от жилья
     q = L.new_player(2, T0)
     q.money = 5000
-    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:6]}
-    assert L.fridge_slots(q) == 10
-    assert not L.can_move(q, "bunk", T0, TZ)[0]                             # там только 4 слота
-    assert L.can_move(q, "dorm", T0, TZ)[0]                                 # 6 слотов: помещается ровно
+    small = R.HOUSING["bunk"]["fridge"]
+    mid = R.HOUSING["dorm"]["fridge"]
+    assert small < mid <= L.fridge_slots(q)                                 # проверка самих констант
+    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:mid]}
+    assert not L.can_move(q, "bunk", T0, TZ)[0]                             # занято больше, чем влезет в bunk
+    assert L.can_move(q, "dorm", T0, TZ)[0]                                 # в dorm помещается ровно
     q.housing = "bunk"
-    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:4]}
+    q.fridge = {c: 1 for c in list(R.INGREDIENTS)[:small]}                  # bunk заполнен целиком
     q.venue = "food"
-    assert "Холодильник полон" in L.buy_problem(q, "pasta")                 # пятый вид не влезает
+    assert "Холодильник полон" in L.buy_problem(q, "pasta")                 # новый вид не влезает
     print("страницы, уровни рецептов, холодильник: OK")
 
 def main():

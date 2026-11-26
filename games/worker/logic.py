@@ -168,7 +168,7 @@ class Player:
         p.bag = {str(k): int(v) for k, v in (d.get("bag") or {}).items()}
         p.cook_xp = float(d.get("cook_xp", 0.0))
         p.day_meals = int(d.get("day_meals", 0))
-        p.buy_qty = d.get("buy_qty", "1") if d.get("buy_qty") in ("1", "2", "max") else "1"
+        p.buy_qty = d.get("buy_qty", "1") if d.get("buy_qty") in ("1", "2", "fill") else "1"
         p.buy_item = d.get("buy_item")
         p.pick_kind, p.pick_code = d.get("pick_kind"), d.get("pick_code")
         p.pick_hours = int(d.get("pick_hours", 0))
@@ -995,13 +995,32 @@ def buy_selected(p: Player) -> tuple:
         p.buy_item = None
     return ok, msg
 
-def ingredient_offer(p: Player, code: str) -> tuple:
-    """(сколько упаковок будет куплено по выбранному количеству, сколько упаковок ещё влезет в слот)."""
+def fill_amount(p: Player, code: str) -> int:
+    """Сколько не хватает до полного слота, если слот занят частично (иначе 0)."""
     ing = R.INGREDIENTS[code]
-    free = max(0, (ing["slot"] - held(p, code)) // ing["pack"])
-    mode = p.buy_qty
-    packs = free if mode == "max" else (int(mode) if mode in ("1", "2") else 1)
-    return packs, free
+    have = held(p, code)
+    return ing["slot"] - have if 0 < have < ing["slot"] else 0
+
+def buy_mode(p: Player, code: str) -> str:
+    """Действующий режим количества для этого товара."""
+    if p.buy_qty == "fill":
+        return "fill" if fill_amount(p, code) > 0 else "1"
+    return p.buy_qty if p.buy_qty in ("1", "2") else "1"
+
+def ingredient_offer(p: Player, code: str) -> tuple:
+    """(сколько будет куплено в г / мл / шт., цена за это, сколько ещё влезает в слот)."""
+    ing = R.INGREDIENTS[code]
+    free = max(0, ing["slot"] - held(p, code))
+    unit = good_price(p.venue, code)                       # цена одной упаковки
+    mode = buy_mode(p, code)
+    if mode == "fill":
+        amount = fill_amount(p, code)
+        price = math.ceil(unit * amount / ing["pack"])     # недостающая часть упаковки, цена пропорциональна
+    else:
+        packs = 2 if mode == "2" else 1
+        amount = packs * ing["pack"]
+        price = unit * packs
+    return amount, price, free
 
 def buy_problem(p: Player, code: str) -> str:
     """Почему этот товар сейчас купить нельзя. Пусто - можно. Ничего не меняет у игрока."""
@@ -1015,13 +1034,12 @@ def buy_problem(p: Player, code: str) -> str:
         if held(p, code) == 0 and len(set(p.fridge) | set(p.bag)) >= fridge_slots(p):
             return (f"Холодильник полон: заняты все {fridge_slots(p)} слотов "
                     "(вместе с тем, что уже в сумке). Сначала приготовьте что-нибудь.")
-        packs, free = ingredient_offer(p, code)
+        amount, price, free = ingredient_offer(p, code)
         if free <= 0:
             return f"Слот «{ing['title']}» заполнен: больше {amount_text(code, ing['slot'])} не поместится."
-        if packs > free:
-            return (f"Столько не поместится: в слот войдёт ещё не больше "
-                    f"{amount_text(code, free * ing['pack'])}. Выберите меньшее количество.")
-        price = good_price(venue, code) * packs
+        if amount > free:
+            return (f"Столько не поместится: в слот войдёт ещё не больше {amount_text(code, free)}. "
+                    "Выберите «Дополнить слот» или меньшее количество.")
         if p.money < price:
             return f"Не хватает денег ({price} м.)."
         return ""
@@ -1050,9 +1068,7 @@ def buy(p: Player, code: str) -> tuple:
     venue = p.venue
     if code in R.INGREDIENTS:                              # продукт не съедается, а едет в сумку
         ing = R.INGREDIENTS[code]
-        packs, _free = ingredient_offer(p, code)
-        price = good_price(venue, code) * packs
-        got = packs * ing["pack"]
+        got, price, _free = ingredient_offer(p, code)
         p.money -= price
         p.bag[code] = p.bag.get(code, 0) + got
         return True, (f"В сумке: {ing['title']} {amount_text(code, got)} за {price} м. "
