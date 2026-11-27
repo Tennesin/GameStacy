@@ -40,13 +40,13 @@ HAPPY_MULT_MAX = 1.1              # при 100% (при 50% равен 1.0)
 # ---------- Жильё и питание ----------
 HOUSING = {
     "bunk": {"title": "Койко-место", "rent": 50, "base": 40.0, "sleep": 0.85, "heal": 0.8, "fridge": 6},
-    "dorm": {"title": "Общежитие", "rent": 65, "base": 45.0, "sleep": 0.92, "heal": 0.9, "fridge": 8},
-    "room": {"title": "Комната", "rent": 85, "base": 50.0, "sleep": 1.0, "heal": 1.0, "fridge": 10},
-    "studio": {"title": "Студия", "rent": 140, "base": 55.0, "sleep": 1.07, "heal": 1.1, "fridge": 12},
-    "flat": {"title": "Квартира", "rent": 210, "base": 60.0, "sleep": 1.15, "heal": 1.2, "fridge": 14},
-    "loft": {"title": "Лофт", "rent": 520, "base": 68.0, "sleep": 1.25, "heal": 1.35, "fridge": 16},
-    "house": {"title": "Дом", "rent": 800, "base": 72.0, "sleep": 1.3, "heal": 1.4, "fridge": 18},
-    "penthouse": {"title": "Пентхаус", "rent": 1200, "base": 76.0, "sleep": 1.35, "heal": 1.5, "fridge": 20},
+    "dorm": {"title": "Общежитие", "rent": 75, "base": 45.0, "sleep": 0.92, "heal": 0.9, "fridge": 8},
+    "room": {"title": "Комната", "rent": 100, "base": 50.0, "sleep": 1.0, "heal": 1.0, "fridge": 10},
+    "studio": {"title": "Студия", "rent": 145, "base": 55.0, "sleep": 1.07, "heal": 1.1, "fridge": 12},
+    "flat": {"title": "Квартира", "rent": 200, "base": 60.0, "sleep": 1.15, "heal": 1.2, "fridge": 14},
+    "loft": {"title": "Лофт", "rent": 325, "base": 68.0, "sleep": 1.25, "heal": 1.35, "fridge": 16},
+    "house": {"title": "Дом", "rent": 500, "base": 72.0, "sleep": 1.3, "heal": 1.4, "fridge": 18},
+    "penthouse": {"title": "Пентхаус", "rent": 1000, "base": 76.0, "sleep": 1.35, "heal": 1.5, "fridge": 20},
 }
 FOOD = {
     "regular": {"title": "Обычное", "cost": 50},
