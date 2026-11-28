@@ -235,8 +235,7 @@ class CountingController:
                         f"Следующее число: **{fmt_num(n + 1)}**.")
             else:
                 text = "🔢 **Счётчик запущен!** Начинаем с **1**."
-            text += ("\nПишите число, можно с комментарием: `58 - ваш текст`. "
-                     "Два числа подряд от одного человека не принимаются.")
+            text += "\n" + R.COUNTING_START_HINT
             try:
                 msg = await ch.send(text, allowed_mentions=NO_PINGS)
             except discord.HTTPException as e:
@@ -244,6 +243,11 @@ class CountingController:
                 return
             self.db.set_channel(gid, cid, msg.id)
             self.channels[cid] = gid
+            try:
+                await msg.pin()
+            except discord.HTTPException:
+                print("ℹ Сообщение с правилами не закреплено: боту не хватает права «Закреплять сообщения». "
+                      "Выдайте его или закрепите сообщение вручную.", flush=True)
         print(f"✔ Счётчик назначен: «{ch.guild.name}» -> #{ch.name}. Следующее число: {n + 1}.", flush=True)
 
     async def remove_chat(self, cid: int):
@@ -279,6 +283,17 @@ class CountingController:
                                  f"🛠 Счёт изменён вручную. Последнее число: **{fmt_num(n)}**, "
                                  f"следующее: **{fmt_num(n + 1)}**.")
         print(f"✔ Сервер {gid}: последнее число = {n}.", flush=True)
+
+    # ==================== /countinghelp ====================
+
+    async def show_help(self, interaction: discord.Interaction):
+        """Справка видна только вызвавшему: чат не засоряется."""
+        g = self.db.get_guild(interaction.guild_id)
+        head = ""
+        if g is not None and g["channel_id"]:
+            head = f"Счётчик ведётся в канале <#{g['channel_id']}>.\n\n"
+        await interaction.response.send_message((head + R.COUNTING_HELP)[:1990], ephemeral=True,
+                                                allowed_mentions=NO_PINGS)
 
     # ==================== /countstats ====================
 
@@ -344,4 +359,10 @@ def setup(bot):
     async def countstats(interaction: discord.Interaction):
         await ctrl.show_stats(interaction)
 
+    @app_commands.command(name="countinghelp", description="Счётчик чисел: правила и как писать числа")
+    @app_commands.guild_only()
+    async def countinghelp(interaction: discord.Interaction):
+        await ctrl.show_help(interaction)
+
     bot.tree.add_command(countstats)
+    bot.tree.add_command(countinghelp)

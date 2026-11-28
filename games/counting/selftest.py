@@ -80,10 +80,16 @@ def test_storage():
             st.con.close()
     print("хранилище: OK")
 
+def test_help():
+    assert len(R.COUNTING_HELP) + 100 <= 1990            # 100 символов - запас под строку с каналом
+    assert "/countinghelp" in R.TEXT_WRONG and "/countinghelp" in R.TEXT_SAME_USER
+    print("справка: OK")
+
 def main():
     test_parse()
     test_check()
     test_special()
+    test_help()
     test_storage()
     print("Все проверки пройдены.")
 
