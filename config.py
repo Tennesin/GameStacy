@@ -37,7 +37,8 @@ ROLES = {
 }
 # Подключаемые игры: пакет должен иметь функцию setup(bot)
 GAMES = [
-    "games.mini_games", "games.x_o", "games.jumanji", "games.ludo", "games.worker",
+    "games.mini_games", "games.x_o", "games.jumanji",
+    "games.ludo", "games.worker", "games.counting",
 ]   # мини-игры подключаются первыми
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

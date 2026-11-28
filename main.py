@@ -32,6 +32,8 @@ class StacyBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.guild_messages = True        # сообщения серверов
+        intents.message_content = True       # привилегированный: текст сообщений
         super().__init__(intents=intents, max_messages=None)
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = on_tree_error
@@ -41,6 +43,9 @@ class StacyBot(discord.Client):
         self.full_games = {}
         self.console_commands["-game"] = console_game
         self._clock_task = None
+        self.message_handlers = []
+        self.raw_delete_handlers = []
+        self.raw_edit_handlers = []
 
     async def setup_hook(self):
         await self.clock.sync()                                 # мгновенная сверка при запуске
@@ -65,6 +70,27 @@ class StacyBot(discord.Client):
 
     async def on_ready(self):
         log.info("Стейси запущена как %s", self.user)
+
+    async def on_message(self, message: discord.Message):
+        for handler in self.message_handlers:
+            try:
+                await handler(message)
+            except Exception:
+                log.exception("Сбой обработчика сообщений")
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        for handler in self.raw_delete_handlers:
+            try:
+                await handler(payload)
+            except Exception:
+                log.exception("Сбой обработчика удаления сообщений")
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        for handler in self.raw_edit_handlers:
+            try:
+                await handler(payload)
+            except Exception:
+                log.exception("Сбой обработчика правки сообщений")
 
     async def close(self):
         if self._clock_task:
