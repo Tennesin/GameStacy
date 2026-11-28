@@ -113,6 +113,8 @@ class Player:
     pick_hours: int = 0                             # выбранная длительность (0 - у варианта её нет)
     page: int = 0                                   # страница текущего постраничного списка
     list_screen: Optional[str] = None               # какой постраничный экран сейчас открыт
+    panel_channel: Optional[int] = None             # где лежит последняя открытая панель /work
+    panel_message: Optional[int] = None             # и её сообщение
 
     def snapshot(self) -> dict:
         iso = lambda v: v.isoformat() if v else None
@@ -134,6 +136,7 @@ class Player:
             "day_meals": self.day_meals, "buy_qty": self.buy_qty, "buy_item": self.buy_item,
             "pick_kind": self.pick_kind, "pick_code": self.pick_code, "pick_hours": self.pick_hours,
             "page": self.page, "list_screen": self.list_screen,
+            "panel_channel": self.panel_channel, "panel_message": self.panel_message,
         }
 
     @classmethod
@@ -174,6 +177,8 @@ class Player:
         p.pick_hours = int(d.get("pick_hours", 0))
         p.page = int(d.get("page", 0))
         p.list_screen = d.get("list_screen")
+        p.panel_channel = int(d["panel_channel"]) if d.get("panel_channel") else None
+        p.panel_message = int(d["panel_message"]) if d.get("panel_message") else None
         if p.pick_kind not in PICK_TABLES or p.pick_code not in PICK_TABLES.get(p.pick_kind, {}):
             p.pick_kind, p.pick_code, p.pick_hours = None, None, 0     # код мог быть выведен из игры
         return p
@@ -626,6 +631,21 @@ def sleep_forecast(p: Player, quanta: Optional[int], tz: tzinfo) -> tuple:
         sim._step()
         n += 1
     return e0, q.energy, h0, q.health, n * R.QUANTUM_MINUTES
+
+def sleep_remaining(p: Player, tz: tzinfo) -> Optional[int]:
+    """Сколько минут осталось спать."""
+    if not p.act or p.act["kind"] != "sleep":
+        return None
+    q = Player.restore(p.snapshot())
+    q.money, q.job, q.venue, q.queue = 10 ** 9, None, None, []   # платежи и работа прогноз не искажают
+    sim = Sim(q, tz)
+    limit = (24 * 60 // R.QUANTUM_MINUTES) * 3                    # потолок: трое суток
+    n = 0
+    while q.act is not None and q.act["kind"] == "sleep" and n < limit:
+        q.updated += QUANTUM
+        sim._step()
+        n += 1
+    return n * R.QUANTUM_MINUTES if 0 < n < limit else None
 
 def abort_shift(p: Player, tz: tzinfo) -> tuple:
     """Добровольный уход со смены или учёбы (срыв). Возвращает ok, текст, события."""

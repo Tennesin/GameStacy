@@ -1,6 +1,7 @@
 """Тексты панели и событий симулятора рабочего."""
 from datetime import datetime, timedelta
 
+from config import TZ
 from . import logic as L
 from . import market as M
 from . import rules as R
@@ -159,12 +160,17 @@ def activity_text(p) -> str:
         if p.venue:
             return f"🛒 В магазине: {R.VENUES[p.venue]['title']}"
         return "🟢 Свободен"
+    if act["kind"] == "sleep":
+        left = L.sleep_remaining(p, TZ)
+        when = ""
+        if left:
+            wake_at = p.updated + timedelta(minutes=left)
+            when = f", осталось ≈ {dur(left)} (проснётесь около {ts(wake_at, 't')})"
+        if act.get("forced"):
+            return "🛌 Принудительный сон" + when
+        return "😴 Спите" + when
     end = L.act_end(p)
     tail = f" (закончится {ts(end)})" if end else ""
-    if act["kind"] == "sleep":
-        if act.get("forced"):
-            return "🛌 Принудительный сон: пока энергия не восстановится"
-        return "😴 Спите" + (tail if end else ", пока не восстановитесь")
     if act["kind"] == "hospital":
         return "🏥 В больнице" + (f", выписка {ts(end)}" if end else "")
     return f"⚙️ {act.get('title', act['kind'])}{tail}"

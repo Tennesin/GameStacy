@@ -4,7 +4,7 @@ import logging
 import math
 import random
 from typing import Optional
-
+from contextlib import suppress
 import discord
 from discord import app_commands
 
@@ -73,6 +73,7 @@ class WorkerController:
         view = PanelView(self, specs)
         if first:
             await interaction.response.send_message(text, view=view)
+            await self._replace_old_panel(interaction)
         else:
             await interaction.response.edit_message(content=text, view=view)
         if problem:                                     # причина провала: только нажавшему
@@ -86,9 +87,30 @@ class WorkerController:
         except discord.HTTPException:
             log.warning("Не удалось показать скрытую подсказку", exc_info=True)
 
+    async def _replace_old_panel(self, interaction: discord.Interaction):
+        """Запоминает только что открытую панель и удаляет прежнюю панель этого же игрока."""
+        try:
+            msg = await interaction.original_response()
+        except discord.HTTPException:
+            log.warning("Не удалось получить сообщение новой панели", exc_info=True)
+            return
+        uid, gid = interaction.user.id, interaction.guild_id
+        async with self.locks[(gid, uid)]:
+            # Внутри блока нет await: подключение не вытеснится из кэша
+            store = self.registry.get(gid)
+            p = store.get_player(uid)
+            if p is None:
+                return
+            old_channel, old_message = p.panel_channel, p.panel_message
+            p.panel_channel, p.panel_message = interaction.channel_id, msg.id
+            store.save_player(p)
+        if old_message and old_message != msg.id:
+            with suppress(discord.HTTPException):       # NotFound и Forbidden тоже сюда входят
+                await (self.bot.get_partial_messageable(old_channel)
+                       .get_partial_message(old_message).delete())
+
     async def on_confirm(self, interaction: discord.Interaction, yes_action: str, panel):
-        """Нажата «Да» в скрытом окне: действие выполняется, публичная панель обновляется.
-        При провале скрытое окно превращается в сообщение с причиной."""
+        """Нажата «Да» в скрытом окне: действие выполняется, публичная панель обновляется."""
         screen, text, specs, problem = await self._process(interaction, yes_action, None)
         view = PanelView(self, specs)
         await interaction.response.edit_message(
