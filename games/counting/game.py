@@ -354,9 +354,9 @@ def setup(bot):
     bot.console_commands["-counting"] = console_counting(ctrl)
     ctrl.catch_task = asyncio.create_task(ctrl.catch_up())
 
-    @app_commands.command(name="countstats", description="Счётчик чисел: статистика сервера")
+    @app_commands.command(name="countingstats", description="Счётчик чисел: статистика сервера")
     @app_commands.guild_only()
-    async def countstats(interaction: discord.Interaction):
+    async def countingstats(interaction: discord.Interaction):
         await ctrl.show_stats(interaction)
 
     @app_commands.command(name="countinghelp", description="Счётчик чисел: правила и как писать числа")
@@ -364,5 +364,5 @@ def setup(bot):
     async def countinghelp(interaction: discord.Interaction):
         await ctrl.show_help(interaction)
 
-    bot.tree.add_command(countstats)
+    bot.tree.add_command(countingstats)
     bot.tree.add_command(countinghelp)
